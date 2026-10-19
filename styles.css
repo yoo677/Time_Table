@@ -387,6 +387,16 @@ svg {
   transition: transform 0.2s var(--ease);
 }
 .pill-btn:active { transform: scale(0.94); }
+.pill-btn:disabled { opacity: 0.45; cursor: default; transform: none; }
+.account-actions { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex-shrink: 0; }
+.link-btn { font-size: 12px; color: var(--text-2); padding: 2px 4px; }
+.link-btn:hover { color: var(--danger); }
+.account-error {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--danger);
+}
 .pill-btn.ghost { background: var(--surface); color: var(--accent); }
 
 .task-list {
@@ -426,6 +436,42 @@ svg {
   flex-shrink: 0;
 }
 .task-main { flex: 1; min-width: 0; }
+.task-check {
+  width: 22px;
+  height: 22px;
+  margin-top: 1px;
+  border-radius: 50%;
+  border: 2px solid var(--c);
+  flex-shrink: 0;
+  position: relative;
+  transition: background-color 0.2s, transform 0.2s var(--ease);
+}
+.task-check:hover { background: color-mix(in srgb, var(--c) 15%, transparent); }
+.task-check:active { transform: scale(0.88); }
+.task-check.on { background: var(--c); }
+.task-check.on::after {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 2px;
+  width: 5px;
+  height: 10px;
+  border: solid #fff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+.task-link {
+  align-self: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  color: var(--text-3);
+  flex-shrink: 0;
+}
+.task-link svg { width: 16px; height: 16px; }
+.task-link:hover { background: var(--surface-3); color: var(--accent); }
 .task-title {
   font-size: 15px;
   font-weight: 600;

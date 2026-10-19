@@ -1,24 +1,36 @@
 // 외부 연동(구글 클래스룸, 구글 Tasks, Teams)에서 가져온 마감 항목.
-// 실제 연동은 아직 없다. 연결 코드가 생기면 setItems(source, items)로 채운다.
+// 연동 모듈(google.js 등)이 setItems(accountId, items)로 채운다. 마지막 결과는 저장해 두어
+// 다시 열었을 때 로그인 전에도 목록이 보인다.
 // 항목: { id, source: 'classroom'|'tasks'|'teams', account: 'personal'|'school',
-//         title, course, due: ISO 문자열, hasTime: bool, done: bool, link }
+//         title, course, due: ISO 문자열|null, hasTime: bool, done: bool, link, ref }
 (() => {
   'use strict';
 
-  const ACCOUNTS = [
-    { id: 'google-personal', label: 'Google 개인 계정', services: ['Classroom', 'Tasks'] },
-    { id: 'google-school', label: 'Google 학교 계정', services: ['Classroom'] },
-    { id: 'microsoft-school', label: 'Microsoft 학교 계정', services: ['Teams 과제'] },
-  ];
-
-  const bySource = new Map();
+  const KEY = 'timetable.sources';
+  const byAccount = new Map();
   const listeners = new Set();
   let demo = false;
 
+  try {
+    const saved = JSON.parse(localStorage.getItem(KEY) || '{}');
+    Object.entries(saved).forEach(([acc, items]) => byAccount.set(acc, items));
+  } catch (e) { /* 캐시가 깨졌으면 무시 */ }
+
+  function persist() {
+    try { localStorage.setItem(KEY, JSON.stringify(Object.fromEntries(byAccount))); } catch (e) { /* 무시 */ }
+  }
   function emit() { listeners.forEach(fn => fn()); }
 
-  function setItems(source, items) {
-    bySource.set(source, items);
+  function setItems(accountId, items) {
+    if (items && items.length) byAccount.set(accountId, items);
+    else byAccount.delete(accountId);
+    persist();
+    emit();
+  }
+
+  function removeItem(id) {
+    byAccount.forEach((items, acc) => byAccount.set(acc, items.filter(it => it.id !== id)));
+    persist();
     emit();
   }
 
@@ -42,16 +54,17 @@
   }
 
   function all() {
-    const out = demo ? demoItems() : [];
-    if (!demo) bySource.forEach(items => out.push(...items));
+    if (demo) return demoItems();
+    const out = [];
+    byAccount.forEach(items => out.push(...items));
     return out;
   }
 
   window.Sources = {
-    ACCOUNTS,
     all,
     setItems,
-    isConnected: () => false,
+    removeItem,
+    hasReal: () => byAccount.size > 0,
     isDemo: () => demo,
     setDemo(on) { demo = !!on; emit(); },
     subscribe: fn => { listeners.add(fn); return () => listeners.delete(fn); },

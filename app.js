@@ -242,6 +242,14 @@
   const taskList = $('task-list');
   const accountsEl = $('accounts');
 
+  function timeAgo(t) {
+    const m = Math.round((Date.now() - t) / 60000);
+    if (m < 1) return '방금';
+    if (m < 60) return `${m}분 전`;
+    const h = Math.round(m / 60);
+    return h < 24 ? `${h}시간 전` : `${Math.round(h / 24)}일 전`;
+  }
+
   function renderAccounts() {
     const frag = document.createDocumentFragment();
     const icons = {
@@ -249,16 +257,52 @@
       'google-school': ['G', '#34a853'],
       'microsoft-school': ['T', '#5b5fc7'],
     };
-    Sources.ACCOUNTS.forEach(acc => {
+    const rows = [
+      ...Google.status(),
+      { id: 'microsoft-school', label: 'Microsoft 학교 계정', services: ['Teams 과제'], soon: true },
+    ];
+    rows.forEach(acc => {
       const row = el('div', 'account');
       const icon = el('span', 'account-icon', icons[acc.id][0]);
       icon.style.background = icons[acc.id][1];
       const text = el('div', 'account-text');
-      text.append(el('div', 'account-name', acc.label), el('div', 'account-sub', `${acc.services.join(' · ')} · 연결 안 됨`));
-      const btn = el('button', 'pill-btn ghost', '연결');
-      btn.type = 'button';
-      btn.addEventListener('click', () => toast('계정 연결은 아직 준비 중이다. 필요한 설정은 docs/INTEGRATIONS.md에 정리해 두었다.'));
-      row.append(icon, text, btn);
+      let sub;
+      if (acc.soon) sub = `${acc.services.join(' · ')} · 준비 중`;
+      else if (acc.busy) sub = '불러오는 중…';
+      else if (acc.connected) {
+        sub = acc.email || '연결됨';
+        if (acc.expired) sub += ' · 로그인 만료';
+        else if (acc.lastSync) sub += ` · ${timeAgo(acc.lastSync)} 갱신`;
+      } else sub = `${acc.services.join(' · ')} · 연결 안 됨`;
+      text.append(el('div', 'account-name', acc.label), el('div', 'account-sub', sub));
+      if (acc.error) text.append(el('div', 'account-error', acc.error));
+
+      const actions = el('div', 'account-actions');
+      if (acc.soon) {
+        const b = el('button', 'pill-btn ghost', '연결');
+        b.type = 'button';
+        b.disabled = true;
+        actions.append(b);
+      } else {
+        const main = el('button', `pill-btn${acc.connected ? ' ghost' : ''}`, acc.connected ? '새로고침' : '연결');
+        main.type = 'button';
+        main.disabled = acc.busy;
+        main.addEventListener('click', () => {
+          if (!Google.configured) {
+            toast('config.js에 구글 클라이언트 ID를 아직 넣지 않았다.');
+            return;
+          }
+          Google.connect(acc.id);
+        });
+        actions.append(main);
+        if (acc.connected) {
+          const off = el('button', 'link-btn', '연결 해제');
+          off.type = 'button';
+          off.addEventListener('click', () => Google.disconnect(acc.id));
+          actions.append(off);
+        }
+      }
+      row.append(icon, text, actions);
       frag.append(row);
     });
     accountsEl.replaceChildren(frag);
@@ -314,13 +358,19 @@
 
     if (!items.length) {
       const empty = el('div', 'empty');
-      empty.append(el('strong', null, '연결된 계정이 없다'));
-      empty.append(document.createTextNode('구글 클래스룸, 구글 Tasks, Teams를 연결하면 마감이 가까운 순서로 여기에 모인다.'));
-      empty.append(el('br'));
-      const b = el('button', 'pill-btn', '예시로 미리 보기');
-      b.type = 'button';
-      b.addEventListener('click', () => { Sources.setDemo(true); Store.setUI({ demo: true }); });
-      empty.append(b);
+      const anyConnected = Google.status().some(a => a.connected);
+      if (anyConnected) {
+        empty.append(el('strong', null, '남은 마감이 없다'));
+        empty.append(document.createTextNode('연결된 계정에서 아직 제출하지 않은 과제와 할 일을 찾지 못했다.'));
+      } else {
+        empty.append(el('strong', null, '연결된 계정이 없다'));
+        empty.append(document.createTextNode('오른쪽 위 사람 모양 버튼에서 계정을 연결하면 마감이 가까운 순서로 여기에 모인다.'));
+        empty.append(el('br'));
+        const b = el('button', 'pill-btn', '예시로 미리 보기');
+        b.type = 'button';
+        b.addEventListener('click', () => { Sources.setDemo(true); Store.setUI({ demo: true }); });
+        empty.append(b);
+      }
       frag.append(empty);
       taskList.replaceChildren(frag);
       return;
@@ -374,7 +424,36 @@
         due.append(el('strong', null, relLabel(t - now, !it.hasTime)));
         due.append(document.createTextNode(dueLabel(new Date(it.due), it.hasTime)));
       }
-      row.append(el('span', 'task-bar'), main, due);
+      if (it.source === 'tasks' && it.ref) {
+        // 구글 Tasks 항목은 여기서 완료 처리할 수 있다
+        const check = el('button', 'task-check');
+        check.type = 'button';
+        check.setAttribute('aria-label', `${it.title} 완료`);
+        check.addEventListener('click', async ev => {
+          ev.stopPropagation();
+          check.classList.add('on');
+          try {
+            await Google.completeTask(it);
+          } catch (err) {
+            check.classList.remove('on');
+            toast(err.message);
+          }
+        });
+        row.append(check);
+      } else {
+        row.append(el('span', 'task-bar'));
+      }
+      row.append(main, due);
+      if (it.link) {
+        const a = el('a', 'task-link');
+        a.href = it.link;
+        a.target = '_blank';
+        a.rel = 'noopener';
+        a.setAttribute('aria-label', `${src.label}에서 열기`);
+        a.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>';
+        a.addEventListener('click', ev => ev.stopPropagation());
+        row.append(a);
+      }
       if (it.due) {
         row.style.cursor = 'pointer';
         row.addEventListener('click', () => {
@@ -1253,6 +1332,10 @@
   Store.subscribe(() => {
     renderMonth();
     if (winMode === 'open') renderDay();
+  });
+  Google.subscribe(() => {
+    renderAccounts();
+    if (!Sources.all().length) renderTasks();
   });
   Sources.subscribe(() => {
     renderMonth();
