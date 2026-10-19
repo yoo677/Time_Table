@@ -16,66 +16,97 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <!-- 달력 화면 -->
-  <main id="calendar" class="calendar">
-    <header class="cal-header">
-      <h1 class="cal-title"><span id="cal-year"></span><span id="cal-month"></span></h1>
-      <div class="segmented" role="group" aria-label="달 이동">
-        <button type="button" id="prev-month" class="seg-btn" aria-label="이전 달">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>
-        </button>
-        <button type="button" id="today-btn" class="seg-btn seg-text">오늘</button>
-        <button type="button" id="next-month" class="seg-btn" aria-label="다음 달">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg>
-        </button>
-      </div>
-    </header>
-    <div class="weekdays" aria-hidden="true">
-      <span class="sun">일</span><span>월</span><span>화</span><span>수</span><span>목</span><span>금</span><span class="sat">토</span>
-    </div>
-    <div id="grid" class="grid" role="grid"></div>
-  </main>
-
-  <!-- 하루 화면 -->
-  <section id="day" class="day" hidden role="dialog" aria-modal="true" aria-labelledby="day-date">
-    <div id="day-inner" class="day-inner">
-      <header class="day-header">
-        <button type="button" id="day-back" class="back-btn">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>
-          <span id="day-back-label">달력</span>
-        </button>
-        <div class="day-nav">
-          <button type="button" id="prev-day" class="round-btn" aria-label="전날">
+  <div id="app" class="app" data-tab="calendar">
+    <!-- 왼쪽: 달력 -->
+    <main id="calendar" class="pane calendar">
+      <header class="cal-header">
+        <h1 id="cal-year" class="cal-title"></h1>
+        <div class="segmented" role="group" aria-label="달 이동">
+          <button type="button" id="prev-month" class="seg-btn" aria-label="이전 달">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>
           </button>
-          <button type="button" id="next-day" class="round-btn" aria-label="다음날">
+          <button type="button" id="month-label" class="seg-btn seg-text" title="이번 달로"></button>
+          <button type="button" id="next-month" class="seg-btn" aria-label="다음 달">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg>
           </button>
         </div>
       </header>
-      <div class="day-heading">
-        <p id="day-weekday" class="day-weekday"></p>
-        <h2 id="day-date" class="day-date"></h2>
-        <div class="day-meta">
-          <label class="pill">
-            <span>시작</span>
-            <input type="time" id="day-start" step="300">
-          </label>
-          <span id="day-summary" class="day-summary"></span>
-        </div>
+      <div class="weekdays" aria-hidden="true">
+        <span class="sun">일</span><span>월</span><span>화</span><span>수</span><span>목</span><span>금</span><span class="sat">토</span>
       </div>
+      <div id="grid" class="grid" role="grid"></div>
+    </main>
+
+    <!-- 오른쪽: 할 일 -->
+    <aside id="tasks" class="pane tasks">
+      <header class="tasks-header">
+        <h2 class="tasks-title">할 일</h2>
+        <button type="button" id="accounts-btn" class="round-btn" aria-label="계정 연결" aria-expanded="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg>
+        </button>
+      </header>
+      <div id="accounts" class="accounts" hidden></div>
+      <div id="task-list" class="task-list"></div>
+    </aside>
+  </div>
+
+  <!-- 폰에서 왼쪽/오른쪽 전환 -->
+  <nav class="tabbar" role="tablist" aria-label="화면 전환">
+    <button type="button" role="tab" data-tab="calendar" aria-selected="true">캘린더</button>
+    <button type="button" role="tab" data-tab="tasks" aria-selected="false">할 일</button>
+  </nav>
+
+  <!-- 하루 시간표 창 -->
+  <section id="win" class="win" hidden role="dialog" aria-labelledby="win-date">
+    <header id="win-titlebar" class="win-titlebar">
+      <div class="win-nav">
+        <button type="button" id="prev-day" class="tb-btn" aria-label="전날">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>
+        </button>
+        <button type="button" id="next-day" class="tb-btn" aria-label="다음날">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg>
+        </button>
+      </div>
+      <div class="win-heading">
+        <h2 id="win-date" class="win-date"></h2>
+        <p id="win-summary" class="win-summary"></p>
+      </div>
+      <div class="win-controls">
+        <button type="button" id="win-min" class="tb-btn" aria-label="최소화" title="최소화">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 12h12"/></svg>
+        </button>
+        <button type="button" id="win-close" class="tb-btn close" aria-label="닫기" title="닫기">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17"/></svg>
+        </button>
+      </div>
+    </header>
+    <div id="win-body" class="win-body">
       <div id="timeline-scroll" class="timeline-scroll">
         <div id="timeline" class="timeline">
           <div id="hours" class="hours"></div>
           <div id="stacks" class="stacks"></div>
+          <div id="deadlines" class="deadlines"></div>
           <div id="now-line" class="now-line" hidden></div>
         </div>
       </div>
+      <div id="drag-tip" class="drag-tip" hidden></div>
       <button type="button" id="add-stack" class="fab" aria-label="스택 추가">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
       </button>
     </div>
+    <div class="rz n" data-dir="n"></div><div class="rz s" data-dir="s"></div>
+    <div class="rz e" data-dir="e"></div><div class="rz w" data-dir="w"></div>
+    <div class="rz ne" data-dir="ne"></div><div class="rz nw" data-dir="nw"></div>
+    <div class="rz se" data-dir="se"></div><div class="rz sw" data-dir="sw"></div>
   </section>
+
+  <!-- 최소화된 창 -->
+  <div id="dock" class="dock" hidden>
+    <button type="button" id="dock-item" class="dock-item">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="15" rx="3"/><path d="M4 10h16M9 3v4M15 3v4"/></svg>
+      <span id="dock-label"></span>
+    </button>
+  </div>
 
   <!-- 스택 입력 시트 -->
   <div id="sheet-backdrop" class="sheet-backdrop" hidden></div>
@@ -91,37 +122,41 @@
       <input id="stack-name" class="name-input" maxlength="40" placeholder="일정 이름" enterkeyhint="done" required>
     </div>
 
-    <p class="group-label">걸리는 시간</p>
-    <div class="group">
-      <div class="duration">
-        <button type="button" id="dur-minus" class="round-btn" aria-label="5분 줄이기">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/></svg>
-        </button>
-        <output id="dur-out" class="dur-out" aria-live="polite"></output>
-        <button type="button" id="dur-plus" class="round-btn" aria-label="5분 늘리기">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-        </button>
+    <div class="pickers">
+      <div class="picker-block">
+        <p class="group-label">시작</p>
+        <div class="group picker">
+          <div id="start-h" class="wheel" aria-label="시작 시"></div>
+          <span class="wheel-sep">:</span>
+          <div id="start-m" class="wheel" aria-label="시작 분"></div>
+        </div>
       </div>
-      <div id="dur-chips" class="chips"></div>
+      <div class="picker-block">
+        <p class="group-label">걸리는 시간</p>
+        <div class="group picker">
+          <div id="dur-h" class="wheel" aria-label="시간"></div>
+          <span class="wheel-unit">시간</span>
+          <div id="dur-m" class="wheel" aria-label="분"></div>
+          <span class="wheel-unit">분</span>
+        </div>
+      </div>
     </div>
+    <p id="sheet-range" class="sheet-range"></p>
 
     <p class="group-label">색상</p>
     <div class="group">
       <div id="colors" class="colors" role="radiogroup" aria-label="색상"></div>
     </div>
 
-    <div id="edit-actions" class="edit-actions" hidden>
-      <div class="group row">
-        <button type="button" id="move-up" class="row-btn">위로 옮기기</button>
-        <button type="button" id="move-down" class="row-btn">아래로 옮기기</button>
-      </div>
-      <div class="group">
-        <button type="button" id="delete-stack" class="row-btn danger">스택 삭제</button>
-      </div>
+    <div id="edit-actions" class="group" hidden>
+      <button type="button" id="delete-stack" class="row-btn danger">스택 삭제</button>
     </div>
   </form>
 
+  <div id="toast" class="toast" hidden role="status"></div>
+
   <script src="store.js"></script>
+  <script src="sources.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
