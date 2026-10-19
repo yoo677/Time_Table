@@ -265,8 +265,9 @@
     try {
       const s = saved[accId] || {};
       // 처음이면 계정 선택 화면, 다시 받는 거면 확인 없이(가능하면 창이 바로 닫힌다)
-      // 지난번에 권한이 빠졌으면 동의 화면을 반드시 다시 띄운다
-      const prompt = s.needConsent ? 'consent select_account' : s.email ? '' : 'select_account';
+      // 처음 연결하거나 지난번에 권한이 빠졌으면 동의 화면을 반드시 띄운다.
+      // 그러지 않으면 구글이 예전에 받은 (빠진) 권한 그대로 창을 바로 닫아 버린다
+      const prompt = !s.email || s.needConsent ? 'consent select_account' : '';
       const r = await requestToken(acc, prompt);
       const granted = grantedOf(acc, r.scope);
       if (!granted.classroom && !granted.tasks) {
