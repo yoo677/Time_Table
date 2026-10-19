@@ -22,6 +22,26 @@
   ];
   const scopesOf = acc => [...BASE_SCOPES, ...CLASSROOM_SCOPES, ...(acc.tasks ? [TASKS_SCOPE] : [])];
 
+  // 새 구글 동의 화면은 권한마다 체크박스가 있어서 일부만 허용될 수 있다.
+  // 토큰 응답의 scope 문자열로 무엇이 허용되었는지 보고, 허용된 기능만 쓴다
+  const SCOPE_NAMES = {
+    'https://www.googleapis.com/auth/classroom.courses.readonly': '클래스룸 수업 보기',
+    'https://www.googleapis.com/auth/classroom.coursework.me.readonly': '클래스룸 과제 보기',
+    [TASKS_SCOPE]: 'Tasks 할 일 관리',
+  };
+  function grantedOf(acc, scopeStr) {
+    const got = new Set(String(scopeStr || '').split(/\s+/));
+    const missing = scopesOf(acc).filter(sc => sc.startsWith('https://') && !got.has(sc));
+    return {
+      classroom: CLASSROOM_SCOPES.every(sc => got.has(sc)),
+      tasks: acc.tasks && got.has(TASKS_SCOPE),
+      missing: missing.map(sc => SCOPE_NAMES[sc] || sc),
+    };
+  }
+  function missingNote(missing) {
+    return `허용 안 된 권한: ${missing.join(', ')}. 다시 연결할 때 권한 화면에서 '모두 선택'에 체크한다.`;
+  }
+
   // { [accountId]: { email, token, exp, lastSync, error } }
   let saved = {};
   try { saved = JSON.parse(localStorage.getItem(KEY) || '{}'); } catch (e) { saved = {}; }
@@ -66,10 +86,6 @@
         login_hint: s.email || undefined,
         callback: r => {
           if (r.error) return reject(new Error(explainAuthError(r.error, r.error_description)));
-          const missing = scopesOf(acc).filter(sc => sc.startsWith('https://') && !google.accounts.oauth2.hasGrantedAllScopes(r, sc));
-          if (missing.length) {
-            return reject(new Error('권한 체크박스가 일부 꺼져 있었다. 다시 연결하면서 모든 항목에 체크한다.'));
-          }
           resolve(r);
         },
         error_callback: e => reject(new Error(e && e.type === 'popup_closed'
@@ -219,15 +235,20 @@
     busy.add(accId);
     emit();
     try {
-      const jobs = [fetchClassroom(acc)];
-      if (acc.tasks) jobs.push(fetchTasks(acc));
+      const g = saved[accId].granted || { classroom: true, tasks: acc.tasks, missing: [] };
+      const jobs = [];
+      if (g.classroom) jobs.push(fetchClassroom(acc));
+      if (g.tasks) jobs.push(fetchTasks(acc));
       const results = await Promise.allSettled(jobs);
       const items = results.filter(r => r.status === 'fulfilled').flatMap(r => r.value);
       const failed = results.find(r => r.status === 'rejected');
       if (failed && failed.reason instanceof AuthExpired) throw failed.reason;
       if (failed && !items.length) throw failed.reason;
       Sources.setItems(accId, items);
-      setAcc(accId, { lastSync: Date.now(), error: failed ? failed.reason.message : null });
+      const notes = [];
+      if (failed) notes.push(failed.reason.message);
+      if (g.missing && g.missing.length) notes.push(missingNote(g.missing));
+      setAcc(accId, { lastSync: Date.now(), error: notes.join(' ') || null });
     } catch (e) {
       setAcc(accId, { error: e instanceof AuthExpired ? null : e.message });
     } finally {
@@ -240,13 +261,25 @@
   async function connect(accId) {
     const acc = ACCOUNTS.find(a => a.id === accId);
     if (!acc) return;
-    if (tokenValid(saved[accId])) return sync(accId);
+    if (tokenValid(saved[accId]) && !saved[accId].needConsent) return sync(accId);
     try {
       const s = saved[accId] || {};
       // 처음이면 계정 선택 화면, 다시 받는 거면 확인 없이(가능하면 창이 바로 닫힌다)
-      const r = await requestToken(acc, s.email ? '' : 'select_account');
-      const patch = { token: r.access_token, exp: Date.now() + (Number(r.expires_in) || 3600) * 1000, error: null };
-      setAcc(accId, patch);
+      // 지난번에 권한이 빠졌으면 동의 화면을 반드시 다시 띄운다
+      const prompt = s.needConsent ? 'consent select_account' : s.email ? '' : 'select_account';
+      const r = await requestToken(acc, prompt);
+      const granted = grantedOf(acc, r.scope);
+      if (!granted.classroom && !granted.tasks) {
+        setAcc(accId, { token: null, exp: 0, needConsent: true, error: missingNote(granted.missing) });
+        return;
+      }
+      setAcc(accId, {
+        token: r.access_token,
+        exp: Date.now() + (Number(r.expires_in) || 3600) * 1000,
+        granted,
+        needConsent: granted.missing.length > 0,
+        error: null,
+      });
       try {
         const info = await api(accId, 'https://openidconnect.googleapis.com/v1/userinfo');
         if (info.email) {
