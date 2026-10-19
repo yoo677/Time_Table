@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f5f5f7" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Time Table">
+  <title>Time Table</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png" type="image/png">
+  <link rel="apple-touch-icon" href="icons/icon-180.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- 달력 화면 -->
+  <main id="calendar" class="calendar">
+    <header class="cal-header">
+      <h1 class="cal-title"><span id="cal-year"></span><span id="cal-month"></span></h1>
+      <div class="segmented" role="group" aria-label="달 이동">
+        <button type="button" id="prev-month" class="seg-btn" aria-label="이전 달">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>
+        </button>
+        <button type="button" id="today-btn" class="seg-btn seg-text">오늘</button>
+        <button type="button" id="next-month" class="seg-btn" aria-label="다음 달">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg>
+        </button>
+      </div>
+    </header>
+    <div class="weekdays" aria-hidden="true">
+      <span class="sun">일</span><span>월</span><span>화</span><span>수</span><span>목</span><span>금</span><span class="sat">토</span>
+    </div>
+    <div id="grid" class="grid" role="grid"></div>
+  </main>
+
+  <!-- 하루 화면 -->
+  <section id="day" class="day" hidden role="dialog" aria-modal="true" aria-labelledby="day-date">
+    <div id="day-inner" class="day-inner">
+      <header class="day-header">
+        <button type="button" id="day-back" class="back-btn">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>
+          <span id="day-back-label">달력</span>
+        </button>
+        <div class="day-nav">
+          <button type="button" id="prev-day" class="round-btn" aria-label="전날">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>
+          </button>
+          <button type="button" id="next-day" class="round-btn" aria-label="다음날">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg>
+          </button>
+        </div>
+      </header>
+      <div class="day-heading">
+        <p id="day-weekday" class="day-weekday"></p>
+        <h2 id="day-date" class="day-date"></h2>
+        <div class="day-meta">
+          <label class="pill">
+            <span>시작</span>
+            <input type="time" id="day-start" step="300">
+          </label>
+          <span id="day-summary" class="day-summary"></span>
+        </div>
+      </div>
+      <div id="timeline-scroll" class="timeline-scroll">
+        <div id="timeline" class="timeline">
+          <div id="hours" class="hours"></div>
+          <div id="stacks" class="stacks"></div>
+          <div id="now-line" class="now-line" hidden></div>
+        </div>
+      </div>
+      <button type="button" id="add-stack" class="fab" aria-label="스택 추가">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+      </button>
+    </div>
+  </section>
+
+  <!-- 스택 입력 시트 -->
+  <div id="sheet-backdrop" class="sheet-backdrop" hidden></div>
+  <form id="sheet" class="sheet" hidden autocomplete="off" aria-labelledby="sheet-title">
+    <div class="grabber" aria-hidden="true"></div>
+    <header class="sheet-header">
+      <button type="button" id="sheet-cancel" class="text-btn">취소</button>
+      <h3 id="sheet-title">새 스택</h3>
+      <button type="submit" id="sheet-save" class="text-btn strong">추가</button>
+    </header>
+
+    <div class="group">
+      <input id="stack-name" class="name-input" maxlength="40" placeholder="일정 이름" enterkeyhint="done" required>
+    </div>
+
+    <p class="group-label">걸리는 시간</p>
+    <div class="group">
+      <div class="duration">
+        <button type="button" id="dur-minus" class="round-btn" aria-label="5분 줄이기">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/></svg>
+        </button>
+        <output id="dur-out" class="dur-out" aria-live="polite"></output>
+        <button type="button" id="dur-plus" class="round-btn" aria-label="5분 늘리기">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
+      </div>
+      <div id="dur-chips" class="chips"></div>
+    </div>
+
+    <p class="group-label">색상</p>
+    <div class="group">
+      <div id="colors" class="colors" role="radiogroup" aria-label="색상"></div>
+    </div>
+
+    <div id="edit-actions" class="edit-actions" hidden>
+      <div class="group row">
+        <button type="button" id="move-up" class="row-btn">위로 옮기기</button>
+        <button type="button" id="move-down" class="row-btn">아래로 옮기기</button>
+      </div>
+      <div class="group">
+        <button type="button" id="delete-stack" class="row-btn danger">스택 삭제</button>
+      </div>
+    </div>
+  </form>
+
+  <script src="store.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
