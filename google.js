@@ -22,26 +22,6 @@
   ];
   const scopesOf = acc => [...BASE_SCOPES, ...CLASSROOM_SCOPES, ...(acc.tasks ? [TASKS_SCOPE] : [])];
 
-  // 새 구글 동의 화면은 권한마다 체크박스가 있어서 일부만 허용될 수 있다.
-  // 토큰 응답의 scope 문자열로 무엇이 허용되었는지 보고, 허용된 기능만 쓴다
-  const SCOPE_NAMES = {
-    'https://www.googleapis.com/auth/classroom.courses.readonly': '클래스룸 수업 보기',
-    'https://www.googleapis.com/auth/classroom.coursework.me.readonly': '클래스룸 과제 보기',
-    [TASKS_SCOPE]: 'Tasks 할 일 관리',
-  };
-  function grantedOf(acc, scopeStr) {
-    const got = new Set(String(scopeStr || '').split(/\s+/));
-    const missing = scopesOf(acc).filter(sc => sc.startsWith('https://') && !got.has(sc));
-    return {
-      classroom: CLASSROOM_SCOPES.every(sc => got.has(sc)),
-      tasks: acc.tasks && got.has(TASKS_SCOPE),
-      missing: missing.map(sc => SCOPE_NAMES[sc] || sc),
-    };
-  }
-  function missingNote(missing) {
-    return `허용 안 된 권한: ${missing.join(', ')}. 다시 연결할 때 권한 화면에서 '모두 선택'에 체크한다.`;
-  }
-
   // { [accountId]: { email, token, exp, lastSync, error } }
   let saved = {};
   try { saved = JSON.parse(localStorage.getItem(KEY) || '{}'); } catch (e) { saved = {}; }
@@ -133,6 +113,7 @@
   function explainApiError(status, msg) {
     if (/has not been used|is disabled/i.test(msg)) return 'Google Cloud 프로젝트에서 Classroom API 또는 Tasks API가 꺼져 있다.';
     if (/ClassroomDisabled|@ClassroomApiDisabled/i.test(msg)) return '이 계정에서는 클래스룸을 쓸 수 없게 되어 있다(학교 관리자 설정).';
+    if (/insufficient|scope/i.test(msg)) return '권한이 부족하다';
     if (status === 403) return `권한이 없다: ${msg}`;
     return `요청 실패(${status}): ${msg}`;
   }
@@ -229,26 +210,34 @@
   }
 
   // ───────── 동기화 ─────────
+  // 토큰 응답의 scope 문자열은 믿지 않고, 실제로 API를 불러 본 결과로 판단한다.
+  // (구글이 돌려주는 scope 문자열이 요청한 형태와 다를 때가 있었다)
   async function sync(accId) {
     const acc = ACCOUNTS.find(a => a.id === accId);
     if (!acc || busy.has(accId) || !tokenValid(saved[accId])) return;
     busy.add(accId);
     emit();
     try {
-      const g = saved[accId].granted || { classroom: true, tasks: acc.tasks, missing: [] };
-      const jobs = [];
-      if (g.classroom) jobs.push(fetchClassroom(acc));
-      if (g.tasks) jobs.push(fetchTasks(acc));
-      const results = await Promise.allSettled(jobs);
-      const items = results.filter(r => r.status === 'fulfilled').flatMap(r => r.value);
-      const failed = results.find(r => r.status === 'rejected');
-      if (failed && failed.reason instanceof AuthExpired) throw failed.reason;
-      if (failed && !items.length) throw failed.reason;
-      Sources.setItems(accId, items);
-      const notes = [];
-      if (failed) notes.push(failed.reason.message);
-      if (g.missing && g.missing.length) notes.push(missingNote(g.missing));
-      setAcc(accId, { lastSync: Date.now(), error: notes.join(' ') || null });
+      const jobs = [{ name: '클래스룸', run: fetchClassroom(acc) }];
+      if (acc.tasks) jobs.push({ name: 'Tasks', run: fetchTasks(acc) });
+      const results = await Promise.allSettled(jobs.map(j => j.run));
+      const fails = [];
+      const items = [];
+      results.forEach((r, i) => {
+        if (r.status === 'fulfilled') items.push(...r.value);
+        else fails.push({ name: jobs[i].name, err: r.reason });
+      });
+      if (fails.some(f => f.err instanceof AuthExpired)) throw new AuthExpired('로그인이 만료되었다.');
+      const scopeFail = fails.some(f => f.err.message === '권한이 부족하다');
+      const notes = fails.map(f => f.err.message === '권한이 부족하다'
+        ? `${f.name} 권한이 허용되지 않았다. 새로고침을 눌러 권한 화면에서 모두 체크한다.`
+        : `${f.name}: ${f.err.message}`);
+      if (fails.length < jobs.length) Sources.setItems(accId, items);
+      setAcc(accId, {
+        lastSync: fails.length < jobs.length ? Date.now() : saved[accId].lastSync,
+        needConsent: scopeFail,
+        error: notes.join(' ') || null,
+      });
     } catch (e) {
       setAcc(accId, { error: e instanceof AuthExpired ? null : e.message });
     } finally {
@@ -264,21 +253,15 @@
     if (tokenValid(saved[accId]) && !saved[accId].needConsent) return sync(accId);
     try {
       const s = saved[accId] || {};
-      // 처음이면 계정 선택 화면, 다시 받는 거면 확인 없이(가능하면 창이 바로 닫힌다)
       // 처음 연결하거나 지난번에 권한이 빠졌으면 동의 화면을 반드시 띄운다.
       // 그러지 않으면 구글이 예전에 받은 (빠진) 권한 그대로 창을 바로 닫아 버린다
       const prompt = !s.email || s.needConsent ? 'consent select_account' : '';
       const r = await requestToken(acc, prompt);
-      const granted = grantedOf(acc, r.scope);
-      if (!granted.classroom && !granted.tasks) {
-        setAcc(accId, { token: null, exp: 0, needConsent: true, error: missingNote(granted.missing) });
-        return;
-      }
       setAcc(accId, {
         token: r.access_token,
         exp: Date.now() + (Number(r.expires_in) || 3600) * 1000,
-        granted,
-        needConsent: granted.missing.length > 0,
+        scope: r.scope || '',
+        needConsent: false,
         error: null,
       });
       try {
