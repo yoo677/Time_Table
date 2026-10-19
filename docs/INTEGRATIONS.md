@@ -84,10 +84,13 @@ Microsoft 쪽은 공식 문서에 접속하지 못해 2차 자료와 기존 지�
 테스트 모드라 구글 심사는 필요 없다. 대신 로그인할 때 '확인되지 않은 앱' 경고가 뜨고, 고급 → 계속을 누르면 된다.
 
 ### Microsoft (Teams)
-1. https://entra.microsoft.com 에서 앱 등록(학교 계정으로 로그인이 안 되면 개인 Microsoft 계정으로 만들고 '모든 조직 디렉터리의 계정' 선택)
-2. 플랫폼: 단일 페이지 애플리케이션(SPA), 리디렉션 URI에 GitHub Pages 주소
-3. API 권한에 Microsoft Graph 위임 권한 `EduAssignments.ReadBasic` 추가
-4. 학교 계정으로 로그인했을 때 관리자 승인이 필요하다고 나오면, 학교 관리자에게 요청해야 한다
+학교 계정으로 학교 디렉터리에 앱을 등록한다(단일 테넌트).
+1. https://entra.microsoft.com → 애플리케이션 → 앱 등록 → 새 등록
+2. 이름 `Time Table`, 지원되는 계정 유형 '이 조직 디렉터리의 계정만(단일 테넌트)'
+3. 리디렉션 URI: 플랫폼 **단일 페이지 애플리케이션(SPA)**, 주소 `https://yoo677.github.io/Time_Table/auth.html` (대소문자까지 같아야 한다)
+4. 개요에서 애플리케이션(클라이언트) ID와 디렉터리(테넌트) ID를 `config.js`에 넣는다(둘 다 비밀 값 아님)
+5. API 권한 → Microsoft Graph → 위임된 권한에 `EduAssignments.ReadBasic`, `offline_access` 추가(`User.Read`는 기본으로 있음)
+6. `EduAssignments.ReadBasic`은 관리자 동의가 필요하다. 학교 Microsoft 365 관리자가 API 권한 화면의 '관리자 동의 허용'을 누르거나, 로그인 때 뜨는 승인 요청을 승인해야 한다
 
 ## 5. 앱 쪽 구현 상태
 
@@ -98,4 +101,7 @@ Microsoft 쪽은 공식 문서에 접속하지 못해 2차 자료와 기존 지�
   - 토큰이 살아 있는 동안은 10분마다 저절로 갱신한다
   - 제출한 과제(TURNED_IN, RETURNED)와 30일보다 오래 지난 과제는 숨긴다
 - `sources.js`: 계정별 항목 보관. 마지막 결과를 브라우저에 저장해 둔다
-- Teams: 아직 없음
+- `microsoft.js`: Microsoft 로그인(인증 코드 + PKCE, 팝업), Teams 과제(`/education/me/assignments`)와 제출 상태
+  - `auth.html`이 로그인 팝업의 결과를 받아 원래 창에 넘긴다
+  - SPA용 refresh token(24시간)으로 그동안은 팝업 없이 갱신한다
+  - 제출한 과제(submitted, returned)와 30일보다 오래 지난 과제는 숨긴다

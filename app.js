@@ -258,8 +258,8 @@
       'microsoft-school': ['T', '#5b5fc7'],
     };
     const rows = [
-      ...Google.status(),
-      { id: 'microsoft-school', label: 'Microsoft 학교 계정', services: ['Teams 과제'], soon: true },
+      ...Google.status().map(a => ({ ...a, provider: Google })),
+      { ...Microsoft.status(), provider: Microsoft },
     ];
     rows.forEach(acc => {
       const row = el('div', 'account');
@@ -288,17 +288,17 @@
         main.type = 'button';
         main.disabled = acc.busy;
         main.addEventListener('click', () => {
-          if (!Google.configured) {
-            toast('config.js에 구글 클라이언트 ID를 아직 넣지 않았다.');
+          if (!acc.provider.configured) {
+            toast('config.js에 이 계정의 클라이언트 ID를 아직 넣지 않았다.');
             return;
           }
-          Google.connect(acc.id);
+          acc.provider.connect(acc.id);
         });
         actions.append(main);
         if (acc.connected) {
           const off = el('button', 'link-btn', '연결 해제');
           off.type = 'button';
-          off.addEventListener('click', () => Google.disconnect(acc.id));
+          off.addEventListener('click', () => acc.provider.disconnect(acc.id));
           actions.append(off);
         }
       }
@@ -358,7 +358,7 @@
 
     if (!items.length) {
       const empty = el('div', 'empty');
-      const anyConnected = Google.status().some(a => a.connected);
+      const anyConnected = Google.status().some(a => a.connected) || Microsoft.status().connected;
       if (anyConnected) {
         empty.append(el('strong', null, '남은 마감이 없다'));
         empty.append(document.createTextNode('연결된 계정에서 아직 제출하지 않은 과제와 할 일을 찾지 못했다.'));
@@ -1333,10 +1333,10 @@
     renderMonth();
     if (winMode === 'open') renderDay();
   });
-  Google.subscribe(() => {
+  [Google, Microsoft].forEach(p => p.subscribe(() => {
     renderAccounts();
     if (!Sources.all().length) renderTasks();
-  });
+  }));
   Sources.subscribe(() => {
     renderMonth();
     renderTasks();

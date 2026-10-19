@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>로그인 중</title>
+  <style>
+    body { margin: 0; height: 100vh; display: grid; place-items: center; font-family: -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif; color: #6e6e73; background: #f5f5f7; }
+  </style>
+</head>
+<body>
+  <p>로그인을 마무리하는 중…</p>
+  <script>
+    // Microsoft 로그인 팝업이 돌아오는 곳. 결과(주소)를 원래 창에 넘기고 닫는다.
+    // 로그인 페이지 정책 때문에 window.opener가 끊길 수 있어 localStorage로도 넘긴다.
+    (function () {
+      var msg = { type: 'timetable-auth', href: location.href, t: Date.now() };
+      try { localStorage.setItem('timetable.ms.auth', JSON.stringify(msg)); } catch (e) {}
+      try { if (window.opener) window.opener.postMessage(msg, location.origin); } catch (e) {}
+      setTimeout(function () { window.close(); }, 300);
+    })();
+  </script>
+</body>
+</html>
