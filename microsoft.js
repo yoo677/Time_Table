@@ -2,6 +2,8 @@
 // 브라우저에서 OAuth 2.0 인증 코드 + PKCE 흐름을 직접 처리한다(라이브러리 없음).
 // 팝업으로 로그인하고 auth.html이 돌려받은 코드를 토큰으로 바꾼다.
 // 단일 페이지 앱(SPA)용 refresh token은 24시간 유효해서, 그동안은 팝업 없이 갱신된다.
+// 24시간이 지나면 사용자의 다음 클릭에 맞춰 prompt=none 로그인 창을 잠깐 열어 다시 받는다(renew).
+// Microsoft 로그인 세션이 살아 있으면 아무것도 누르지 않아도 창이 닫힌다.
 (() => {
   'use strict';
 
@@ -229,12 +231,12 @@
     }
   }
 
-  async function connect() {
+  async function connect(silent) {
     if (!CLIENT_ID) throw new Error('config.js에 Microsoft 클라이언트 ID가 비어 있다.');
     // 로그인이 살아 있거나 refresh token으로 갱신할 수 있으면 팝업 없이 새로고침
     if (saved.email && (tokenValid() || refreshValid())) return sync();
     // 팝업은 클릭 직후 기다림 없이 열어야 차단되지 않는다
-    const popup = loginPopup(saved.email ? '' : 'select_account');
+    const popup = loginPopup(silent ? 'none' : saved.email ? '' : 'select_account');
     try {
       const { code, verifier } = await popup;
       storeTokens(await tokenRequest({ grant_type: 'authorization_code', code, redirect_uri: REDIRECT_URI, code_verifier: verifier }));
@@ -248,8 +250,21 @@
       Sources.setDemo(false);
       await sync();
     } catch (e) {
-      set({ error: e.message });
+      // 조용한 갱신이 안 되면(세션 만료 등) 오류 대신 만료 표시만 남긴다
+      if (!silent) set({ error: e.message });
     }
+  }
+
+  // ───────── 자동 갱신 ─────────
+  let renewTried = 0;
+  function renewable() {
+    return !!(CLIENT_ID && saved.email && !busy && !pending && !tokenValid() && !refreshValid()
+      && Date.now() - renewTried > 10 * 60 * 1000);
+  }
+  // 반드시 클릭 이벤트 안에서 불러야 한다
+  function renew() {
+    renewTried = Date.now();
+    connect(true).catch(() => { /* 만료 표시가 남는다 */ });
   }
 
   function disconnect() {
@@ -276,6 +291,9 @@
   }
   setTimeout(syncIfPossible, 0);
   setInterval(syncIfPossible, SYNC_EVERY);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && (!saved.lastSync || Date.now() - saved.lastSync > 2 * 60 * 1000)) syncIfPossible();
+  });
   setInterval(emit, 60 * 1000);
 
   window.Microsoft = {
@@ -284,6 +302,8 @@
     status,
     connect: () => connect().catch(e => set({ error: e.message })),
     disconnect,
+    renewable,
+    renew,
     subscribe: fn => { listeners.add(fn); return () => listeners.delete(fn); },
   };
 })();

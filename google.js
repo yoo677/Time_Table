@@ -1,6 +1,8 @@
 // 구글 계정 연동: 클래스룸 과제(개인·학교 계정), 구글 Tasks(개인 계정).
 // 브라우저에서 Google Identity Services(GIS)로 access token을 받아 REST API를 직접 부른다.
-// 토큰은 1시간짜리라, 만료되면 사용자가 버튼을 눌러 다시 받는다(팝업은 클릭 직후에만 열 수 있다).
+// 토큰은 1시간짜리다. 브라우저만으로는 refresh token을 받을 수 없어(구글 웹 클라이언트는 비밀 키가 필요),
+// 만료가 가까우면 사용자의 다음 클릭에 맞춰 로그인 창을 잠깐 열어 다시 받는다(renew).
+// 이미 동의한 계정이면 창이 저절로 닫힌다. 팝업은 클릭 직후에만 열 수 있어서 완전 자동은 아니다.
 (() => {
   'use strict';
 
@@ -38,6 +40,9 @@
     emit();
   }
   const tokenValid = s => s && s.token && s.exp > Date.now() + 60 * 1000;
+  const RENEW_BEFORE = 5 * 60 * 1000;   // 만료 5분 전부터 갱신 대상
+  const RENEW_RETRY = 10 * 60 * 1000;   // 자동 갱신이 실패하면 이만큼 쉬었다 다시 시도
+  const renewTried = {};
 
   // ───────── GIS 스크립트 ─────────
   let gisLoaded = false;
@@ -251,6 +256,11 @@
     const acc = ACCOUNTS.find(a => a.id === accId);
     if (!acc) return;
     if (tokenValid(saved[accId]) && !saved[accId].needConsent) return sync(accId);
+    return login(acc);
+  }
+
+  async function login(acc, silent) {
+    const accId = acc.id;
     try {
       const s = saved[accId] || {};
       // 처음 연결하거나 지난번에 권한이 빠졌으면 동의 화면을 반드시 띄운다.
@@ -278,8 +288,42 @@
       Sources.setDemo(false);
       await sync(accId);
     } catch (e) {
-      setAcc(accId, { error: e.message });
+      // 자동 갱신이 실패한 것은 오류로 띄우지 않는다. 만료 표시가 남아 있으니 직접 누르면 된다
+      if (!silent) setAcc(accId, { error: e.message });
     }
+  }
+
+  // ───────── 자동 갱신 ─────────
+  // 한 번 연결했고, 토큰이 곧 끝나거나 끝난 계정 하나를 고른다
+  function renewable() {
+    const acc = ACCOUNTS.find(a => {
+      const s = saved[a.id];
+      if (!s || !s.email || s.needConsent || busy.has(a.id)) return false;
+      if (s.token && s.exp > Date.now() + RENEW_BEFORE) return false;
+      return !renewTried[a.id] || Date.now() - renewTried[a.id] > RENEW_RETRY;
+    });
+    return gisLoaded && acc ? acc.id : null;
+  }
+
+  // 반드시 클릭 이벤트 안에서 불러야 한다
+  function renew(accId) {
+    const acc = ACCOUNTS.find(a => a.id === accId);
+    if (!acc) return;
+    renewTried[accId] = Date.now();
+    login(acc, true);
+  }
+
+  // Tasks에 새 할 일 추가(날짜만). due는 'YYYY-MM-DD' 또는 null
+  function canAddTask() {
+    return ACCOUNTS.some(a => a.tasks && tokenValid(saved[a.id]));
+  }
+  async function addTask(title, due) {
+    const acc = ACCOUNTS.find(a => a.tasks && tokenValid(saved[a.id]));
+    if (!acc) throw new Error('Google Tasks 로그인이 만료되었다.');
+    const body = { title };
+    if (due) body.due = `${due}T00:00:00.000Z`;
+    await api(acc.id, 'https://tasks.googleapis.com/tasks/v1/lists/%40default/tasks', { method: 'POST', body: JSON.stringify(body) });
+    await sync(acc.id);
   }
 
   function disconnect(accId) {
@@ -328,6 +372,14 @@
   loadGis();
   setTimeout(syncAllValid, 0);
   setInterval(syncAllValid, SYNC_EVERY);
+  // 다른 앱을 보다가 돌아오면 바로 새로고침(마지막 갱신이 2분보다 오래되었을 때만)
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return;
+    ACCOUNTS.forEach(acc => {
+      const s = saved[acc.id];
+      if (tokenValid(s) && (!s.lastSync || Date.now() - s.lastSync > 2 * 60 * 1000)) sync(acc.id);
+    });
+  });
   // 토큰 만료 표시를 갱신
   setInterval(emit, 60 * 1000);
 
@@ -338,6 +390,10 @@
     sync,
     disconnect,
     completeTask,
+    renewable,
+    renew,
+    canAddTask,
+    addTask,
     subscribe: fn => { listeners.add(fn); return () => listeners.delete(fn); },
   };
 })();

@@ -10,7 +10,8 @@
   const listeners = new Set();
   let state = load();
 
-  // 스택: { id, name, color, start(분), minutes, x(0~1), w(0~1) }
+  // 스택: { id, name, color, start(분), minutes, x(0~1), w(0~1), taskId? }
+  // taskId는 할 일 목록에서 끌어다 만든 스택이 어느 할 일에서 왔는지 기억한다
   // v1 데이터는 start/x/w가 없고 day.start부터 차례로 쌓여 있었다. 그 위치를 그대로 옮겨 온다.
   function normalize(s) {
     const days = {};
@@ -26,6 +27,7 @@
           x: typeof st.x === 'number' ? st.x : 0,
           w: typeof st.w === 'number' ? st.w : 1,
         };
+        if (st.taskId) out.taskId = st.taskId;
         cursor = out.start + out.minutes;
         return out;
       });
