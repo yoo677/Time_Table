@@ -1,0 +1,131 @@
+# 외부 연동 조사 (구글 클래스룸 · 구글 Tasks · Teams)
+
+조사일: 2026-10-19. API 사실은 구글 공식 Discovery 문서(classroom v1, tasks v1)에서 직접 확인했다.
+Microsoft 쪽은 공식 문서에 접속하지 못해 2차 자료와 기존 지식에 기대고 있으니, 실제로 붙이기 전에 다시 확인한다.
+
+## 한눈에 보기
+
+| 연동 | 가져올 것 | 가능 여부 | 막힐 수 있는 지점 |
+|---|---|---|---|
+| Classroom (개인 계정) | 과제명, 마감 날짜·시각, 제출 여부 | 가능 | 거의 없음 |
+| Classroom (학교 계정) | 같음 | 가능(연결 확인됨) | 만 18세 미만 학생 계정은 등록 안 된 외부 앱이 기본 차단 |
+| Google Tasks (개인 계정) | 할 일 제목, 날짜, 완료 | 가능 | 시각은 API로 못 읽음(날짜만) |
+| Teams 과제 (학교 계정) | 과제명, 마감 시각 | 학교 관리자 동의가 필요할 가능성 높음 | 관리자 동의, 학교가 Teams 과제 기능을 쓰는지 |
+
+## 1. 구글 클래스룸
+
+**방식.** 브라우저에서 Google Identity Services(GIS)로 로그인해 access token을 받고, Classroom REST API를 직접 부른다. 서버는 필요 없다.
+
+**순서.**
+1. `GET https://classroom.googleapis.com/v1/courses?studentId=me&courseStates=ACTIVE` 로 수강 중인 수업 목록
+2. 수업마다 `GET /v1/courses/{courseId}/courseWork?courseWorkStates=PUBLISHED` 로 과제 목록
+3. 수업마다 `GET /v1/courses/{courseId}/courseWork/-/studentSubmissions?userId=me` 로 내 제출 상태 (`-`는 그 수업의 모든 과제라는 뜻)
+4. 제출 상태가 `TURNED_IN` 또는 `RETURNED`인 과제는 목록에서 빼거나 완료로 표시
+
+**쓰는 필드.**
+- `title`: 과제명
+- `dueDate` + `dueTime`: 마감. 둘 다 **UTC 기준**이라 한국 시각(UTC+9)으로 바꿔야 한다. 예: `dueDate 2026-10-19`, `dueTime 14:59` → 한국 시각 10월 19일 23:59
+- `alternateLink`: 클래스룸에서 그 과제를 여는 링크
+- 제출 상태 `state`: `NEW`, `CREATED`, `TURNED_IN`, `RETURNED`, `RECLAIMED_BY_STUDENT`
+
+**필요한 권한(scope).** 읽기 전용만 쓴다.
+- `https://www.googleapis.com/auth/classroom.courses.readonly`
+- `https://www.googleapis.com/auth/classroom.coursework.me.readonly`
+
+**계정 두 개.** GIS 토큰 요청을 계정마다 따로 한다(`login_hint`에 이메일을 넣으면 그 계정으로 바로 간다). 토큰도 계정별로 따로 들고 있는다.
+이메일 주소는 코드에 박아 두지 않고 연결할 때 입력받는다. 레포가 public이 되면 코드가 모두 공개되기 때문이다.
+
+### 학교 계정(sshs.hs.kr)에서 막힐 수 있는 이유
+
+학교 계정은 학교가 관리하는 Google Workspace for Education 계정이다. 구글 정책상
+**만 18세 미만으로 지정된 학생 계정은 관리자가 따로 허용하지 않은 외부 앱(unconfigured third-party apps)에 로그인할 수 없다.**
+막히면 `access_not_configured` 오류가 나고, 학생 화면에 관리자에게 접근을 요청하는 버튼이 뜬다.
+관리자가 Admin console → 보안 → API 제어 → 검토 대기 중인 앱에서 허용해야 쓸 수 있다.
+
+**2026-10-19 확인: sshs.hs.kr 학교 계정은 이 앱에 로그인하고 클래스룸을 불러오는 데 성공했다.** 학교 관리자 설정이 바뀌면 다시 막힐 수 있다.
+막히면 고를 수 있는 방법:
+- 정보부장 선생님이나 학교 관리자에게 앱 허용을 요청한다
+- 학교 클래스룸 알림 메일이 개인 Gmail로 오게 해 두고, 개인 계정 쪽에서 메일을 읽어 과제를 뽑는다(정확도가 떨어지고 범위가 커서 마지막 수단)
+
+## 2. 구글 Tasks
+
+- 목록: `GET https://tasks.googleapis.com/tasks/v1/users/@me/lists`
+- 할 일: `GET /tasks/v1/lists/{tasklist}/tasks?showCompleted=false`
+- 완료 처리: `PATCH /tasks/v1/lists/{tasklist}/tasks/{task}` 에 `status: "completed"`
+- scope: `https://www.googleapis.com/auth/tasks` (완료 체크까지 하려면 읽기 전용이 아닌 이 권한)
+
+**제약.** Tasks API 문서에 '날짜 정보만 기록되고 시각은 버려진다. API로 시각을 읽거나 쓸 수 없다'고 적혀 있다.
+구글 Tasks 앱에서 시각을 넣어 둔 할 일도 API로는 날짜만 온다. 그래서 오른쪽 목록에서는 그날 마감으로 보고 정렬하고, 시간표 위의 마감선으로는 그리지 않는다.
+
+## 3. Teams (학교 계정)
+
+**방식.** Microsoft Graph의 Education API. 브라우저에서 MSAL.js로 로그인해 토큰을 받는다.
+- 과제 목록: `GET https://graph.microsoft.com/v1.0/education/me/assignments`
+- 마감 시각: 과제의 `dueDateTime` (UTC)
+- 권한: `EduAssignments.ReadBasic` (위임 권한, 성적 없이 과제만 읽기)
+
+**확인된 것과 확인 못 한 것.**
+- 이 권한은 회사·학교 계정 전용이고 개인 Microsoft 계정은 지원하지 않는다고 나와 있다.
+- 2차 자료(권한 목록 사이트)에는 이 권한이 **관리자 동의 필요**로 표시되어 있다. 공식 문서로 다시 확인해야 한다. 맞다면 학교 Microsoft 365 관리자가 앱을 승인해야 쓸 수 있다.
+- 학교가 Teams의 과제(Assignments) 기능으로 과제를 내는지도 확인이 필요하다. Teams를 채팅이나 수업 링크로만 쓰면 가져올 과제가 없다.
+- 학교 Microsoft 계정의 아이디가 구글 학교 계정과 같은 주소인지 모른다. 연결할 때 확인한다.
+
+## 4. 준비 작업(사용자가 할 일)
+
+### 구글 (Classroom + Tasks 공통, 한 번만)
+1. https://console.cloud.google.com 에서 새 프로젝트 만들기 (개인 계정으로)
+2. API 및 서비스 → 라이브러리에서 **Google Classroom API**, **Google Tasks API** 사용 설정
+3. OAuth 동의 화면: 사용자 유형 '외부', 게시 상태 '테스트'. 테스트 사용자에 개인 계정과 학교 계정을 둘 다 추가
+4. 사용자 인증 정보 → OAuth 클라이언트 ID → 유형 '웹 애플리케이션'. 승인된 JavaScript 원본에
+   - `https://yoo677.github.io` (GitHub Pages 주소)
+   - `http://localhost:8000` (내 컴퓨터에서 시험할 때)
+5. 만들어진 클라이언트 ID(…apps.googleusercontent.com)를 알려 주면 코드에 넣는다. 클라이언트 ID는 공개되어도 되는 값이다(비밀 키 아님)
+
+테스트 모드라 구글 심사는 필요 없다. 대신 로그인할 때 '확인되지 않은 앱' 경고가 뜨고, 고급 → 계속을 누르면 된다.
+
+### Microsoft (Teams)
+학교 계정으로 학교 디렉터리에 앱을 등록한다(단일 테넌트).
+1. https://entra.microsoft.com → 애플리케이션 → 앱 등록 → 새 등록
+2. 이름 `Time Table`, 지원되는 계정 유형 '이 조직 디렉터리의 계정만(단일 테넌트)'
+3. 리디렉션 URI: 플랫폼 **단일 페이지 애플리케이션(SPA)**, 주소 `https://yoo677.github.io/Time_Table/auth.html` (대소문자까지 같아야 한다)
+4. 개요에서 애플리케이션(클라이언트) ID와 디렉터리(테넌트) ID를 `config.js`에 넣는다(둘 다 비밀 값 아님)
+5. API 권한 → Microsoft Graph → 위임된 권한에 `EduAssignments.ReadBasic`, `offline_access` 추가(`User.Read`는 기본으로 있음)
+6. `EduAssignments.ReadBasic`은 관리자 동의가 필요하다. 학교 Microsoft 365 관리자가 API 권한 화면의 '관리자 동의 허용'을 누르거나, 로그인 때 뜨는 승인 요청을 승인해야 한다
+
+## 5. 앱 쪽 구현 상태
+
+- `config.js`: 구글 클라이언트 ID를 넣는 곳
+- `google.js`: 구글 로그인(GIS 토큰 방식), 클래스룸 과제와 제출 상태, Tasks 할 일과 완료 처리
+  - 계정 메뉴(할 일 패널 오른쪽 위 사람 버튼)에서 계정마다 `연결`을 누른다
+  - 로그인은 1시간 뒤 만료된다. 만료되어도 마지막으로 불러온 목록은 그대로 보이고, `새로고침`을 누르면 다시 로그인 창이 잠깐 떴다 닫히며 갱신된다
+  - 토큰이 살아 있는 동안은 10분마다 저절로 갱신한다
+  - 제출한 과제(TURNED_IN, RETURNED)와 30일보다 오래 지난 과제는 숨긴다
+- `sources.js`: 계정별 항목 보관. 마지막 결과를 브라우저에 저장해 둔다
+- `microsoft.js`: Microsoft 로그인(인증 코드 + PKCE, 팝업), Teams 과제(`/education/me/assignments`)와 제출 상태
+  - `auth.html`이 로그인 팝업의 결과를 받아 원래 창에 넘긴다
+  - SPA용 refresh token(24시간)으로 그동안은 팝업 없이 갱신한다
+  - 제출한 과제(submitted, returned)와 30일보다 오래 지난 과제는 숨긴다
+
+## 6. 로그인 자동 갱신
+
+**문제.** 구글 access token은 1시간, Microsoft SPA refresh token은 24시간이면 끝난다. 끝나면 버튼을 다시 눌러야 했다.
+
+**왜 완전 자동이 안 되나.**
+- 구글: 브라우저만으로 refresh token을 받는 길이 없다. 구글의 '웹 애플리케이션' 클라이언트는 code를 토큰으로 바꿀 때 client secret을 요구하고, 비밀 값은 공개 페이지에 둘 수 없다. GIS 토큰 방식은 팝업이 필요하고, 브라우저는 사용자 클릭 없이 연 팝업을 막는다.
+- Microsoft: SPA로 등록한 앱의 refresh token은 처음 로그인부터 24시간이 상한이다(새로 받은 토큰도 그 만료를 이어받는다). 숨은 iframe으로 조용히 다시 받는 방법(MSAL ssoSilent)은 Safari 등이 제3자 쿠키를 막아 믿기 어렵다.
+
+**지금 넣은 방법(서버 없음).**
+1. 만료 5분 전부터 그 계정을 '갱신 대상'으로 본다
+2. 사용자가 화면 어디든 다음에 클릭하면, 그 클릭 안에서 로그인 창을 연다
+   - 구글: `prompt` 없이 `login_hint`로 요청 → 이미 동의한 계정이면 창이 저절로 닫힌다
+   - Microsoft: `prompt=none` → Microsoft 로그인 세션이 살아 있으면 창이 저절로 닫힌다. 세션이 없으면 오류 없이 만료 표시만 남는다
+3. 실패하면 10분 동안 다시 시도하지 않는다
+4. 다른 앱을 보다 돌아오면(visibilitychange) 토큰이 살아 있는 계정을 바로 새로고침한다
+5. 계정 메뉴의 `로그인 자동 갱신`으로 끄고 켠다(기본 켬)
+
+창이 한 시간에 한 번쯤 잠깐 떴다 닫히는 것이 남는 불편이다.
+
+**완전 자동으로 가려면 작은 서버가 필요하다(아직 안 함).**
+- Cloudflare Workers 같은 무료 서버리스 함수에 구글 client secret을 두고, 로그인 때 받은 refresh token을 서버 쪽에 보관한다. 앱은 그 함수에 새 access token을 달라고만 하면 된다. Microsoft도 앱 등록을 '웹' 플랫폼(비밀 값 사용)으로 하나 더 만들면 refresh token이 90일까지 간다.
+- 대신 토큰을 서버에 맡기므로 그 함수에 접근 제한(내 계정만)을 반드시 걸어야 하고, 학교 계정은 관리자 정책에 따라 막힐 수 있다.
+

@@ -1,0 +1,1995 @@
+(() => {
+  'use strict';
+
+  const $ = id => document.getElementById(id);
+  const pad = n => String(n).padStart(2, '0');
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  const keyOf = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const parseKey = k => { const [y, m, d] = k.split('-').map(Number); return new Date(y, m - 1, d); };
+  const addDays = (d, n) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
+  const el = (tag, cls, text) => {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text;
+    return e;
+  };
+
+  const WEEKDAYS = ['일요일', '월요일', '화요일', '수요일', '목요일', '금요일', '토요일'];
+  const WD_SHORT = ['일', '월', '화', '수', '목', '금', '토'];
+  const COLORS = ['#007aff', '#34c759', '#ff9500', '#ff2d55', '#af52de', '#5ac8fa', '#ffcc00', '#8e8e93'];
+  const SOURCE_INFO = {
+    classroom: { label: 'Classroom', color: 'var(--src-classroom)', stack: '#34c759' },
+    tasks: { label: 'Tasks', color: 'var(--src-tasks)', stack: '#007aff' },
+    teams: { label: 'Teams', color: 'var(--src-teams)', stack: '#af52de' },
+  };
+  const DAY_MIN = 24 * 60;
+  const SNAP_MIN = 5;      // 세로 이동·길이 조절 단위(분)
+  const SNAP_X = 1 / 24;   // 가로 이동·폭 조절 단위(전체 폭 대비)
+  const MIN_W = 1 / 6;     // 스택 최소 폭
+  const MAX_WINS = 6;      // 동시에 띄우는 시간표 창 수
+  const DROP_MIN = 60;     // 할 일을 끌어 놓을 때 기본 길이(분)
+
+  function fmtTime(min) {
+    const next = min >= DAY_MIN;
+    const m = min % DAY_MIN;
+    return `${next ? '다음날 ' : ''}${pad(Math.floor(m / 60))}:${pad(m % 60)}`;
+  }
+  function fmtDur(min) {
+    const h = Math.floor(min / 60), m = min % 60;
+    if (h && m) return `${h}시간 ${m}분`;
+    return h ? `${h}시간` : `${m}분`;
+  }
+
+  // ───────── 애니메이션 ─────────
+  // 감쇠 진동(스프링) 곡선을 linear()로 근사한다. 지원하지 않는 브라우저는 애플 기본 곡선으로 대체.
+  const SUPPORTS_LINEAR = typeof CSS !== 'undefined' && CSS.supports('animation-timing-function', 'linear(0, 1)');
+  const REDUCED = matchMedia('(prefers-reduced-motion: reduce)');
+
+  function spring(stiffness, damping) {
+    if (!SUPPORTS_LINEAR) return { easing: 'cubic-bezier(0.32, 0.72, 0, 1)', duration: 480 };
+    const w0 = Math.sqrt(stiffness);
+    const zeta = damping / (2 * w0);
+    const wd = w0 * Math.sqrt(1 - zeta * zeta);
+    const x = t => 1 - Math.exp(-zeta * w0 * t) * (Math.cos(wd * t) + (zeta * w0 / wd) * Math.sin(wd * t));
+    const dur = -Math.log(0.001) / (zeta * w0);
+    const pts = [];
+    for (let i = 0; i <= 64; i++) pts.push(+x(dur * i / 64).toFixed(4));
+    pts[64] = 1;
+    return { easing: `linear(${pts.join(', ')})`, duration: Math.round(dur * 1000) };
+  }
+  const SPRING_SMOOTH = spring(240, 28);
+  const SPRING_BOUNCY = spring(320, 26);
+  const SPRING_ELASTIC = spring(260, 17); // 접힌 할 일 더미가 펴질 때
+  const EASE_OUT = { duration: 260, easing: 'cubic-bezier(0.32, 0.72, 0, 1)' };
+  const motion = s => REDUCED.matches ? { duration: 1, easing: 'linear' } : s;
+
+  // 높이를 지금 값에서 목표 값으로 옮긴다. 도중에 다시 불러도 그 자리에서 이어진다
+  function animateHeight(box, from, to, timing) {
+    box.getAnimations().forEach(a => a.cancel());
+    box.style.overflow = 'hidden';
+    const a = box.animate([{ height: `${from}px` }, { height: `${to}px` }], motion(timing));
+    a.onfinish = () => { box.style.overflow = ''; };
+    return a;
+  }
+
+  let toastTimer = null;
+  function toast(msg) {
+    const t = $('toast');
+    t.textContent = msg;
+    t.hidden = false;
+    t.getAnimations().forEach(a => a.cancel());
+    t.animate([{ opacity: 0, transform: 'translate(-50%, -8px)' }, { opacity: 1, transform: 'translate(-50%, 0)' }], motion(SPRING_SMOOTH));
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+      t.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 200, fill: 'forwards' }).finished.then(() => {
+        t.hidden = true;
+        t.getAnimations().forEach(a => a.cancel());
+      });
+    }, 3200);
+  }
+
+  // ───────── 상태 ─────────
+  const ui = Store.getUI();
+  let viewMonth = (() => { const t = new Date(); return new Date(t.getFullYear(), t.getMonth(), 1); })();
+
+  if (ui.demo || new URLSearchParams(location.search).has('demo')) Sources.setDemo(true);
+
+  // 마감 항목을 날짜별로 나눈다
+  function dueInfo(item) {
+    if (!item.due) return null;
+    const d = new Date(item.due);
+    return { date: d, key: keyOf(d), min: d.getHours() * 60 + d.getMinutes() };
+  }
+  function deadlinesOn(key) {
+    return Sources.all()
+      .filter(it => !it.done && it.hasTime && it.source !== 'tasks')
+      .map(it => ({ it, info: dueInfo(it) }))
+      .filter(x => x.info && x.info.key === key)
+      .sort((a, b) => a.info.min - b.info.min);
+  }
+
+  // ───────── 맨 위 줄: 날짜, 시계, 날씨 ─────────
+  function tickClock() {
+    const n = new Date();
+    $('clock-date').textContent = `${n.getFullYear()}/${pad(n.getMonth() + 1)}/${pad(n.getDate())} (${WD_SHORT[n.getDay()]})`;
+    $('clock-time').textContent = `${pad(n.getHours())}:${pad(n.getMinutes())}:${pad(n.getSeconds())}`;
+    // 초가 바뀌는 순간에 맞춰 다시 부른다
+    setTimeout(tickClock, 1000 - (Date.now() % 1000) + 5);
+  }
+
+  function renderWeather() {
+    const w = Weather.get();
+    const nowBtn = $('wx-now');
+    if (w.status !== 'ok') {
+      $('wx-icon').textContent = '';
+      $('wx-temp').textContent = w.status === 'error' ? '날씨 없음' : '날씨…';
+      $('wx-desc').textContent = '';
+      $('wx-place').textContent = '';
+      nowBtn.title = w.error || '';
+      $('wx-hourly').replaceChildren();
+      return;
+    }
+    const cur = Weather.describe(w.current.code, w.current.isDay);
+    $('wx-icon').textContent = cur.icon;
+    $('wx-temp').textContent = `${w.current.temp}°`;
+    $('wx-desc').textContent = `${cur.text} · 체감 ${w.current.feels}°`;
+    $('wx-place').textContent = w.place ? `${w.approximate ? '≈ ' : ''}${w.place}` : '';
+    nowBtn.title = w.approximate
+      ? '위치 권한이 없어 서울 기준으로 보여 준다'
+      : `${w.place || '현재 위치'} · ${w.fetchedAt ? new Date(w.fetchedAt).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' }) : ''} 갱신`;
+
+    $('wx-hourly').replaceChildren(...w.hourly.map((h, i) => {
+      const d = Weather.describe(h.code, h.isDay);
+      const cell = el('div', `wx-h${i === 0 ? ' now' : ''}`);
+      cell.title = `${h.hour}시 ${d.text}${h.pop != null ? ` · 강수 ${h.pop}%` : ''}`;
+      const time = el('span', 'wx-h-time', i === 0 ? '지금' : `${h.hour}시`);
+      if (h.pop >= 30) time.append(el('span', 'wx-h-pop', ` ${h.pop}%`));
+      cell.append(time, el('span', 'wx-h-icon', d.icon), el('span', 'wx-h-temp', `${h.temp}°`));
+      return cell;
+    }));
+  }
+
+  // 폰에서는 시간별 예보를 접어 두고, 현재 날씨를 누르면 편다. 넓은 화면에서는 누르면 새로 받는다
+  $('wx-now').addEventListener('click', e => {
+    if (!matchMedia('(max-width: 639px)').matches) { Weather.refresh(); return; }
+    const hourly = $('wx-hourly');
+    const open = !hourly.classList.contains('show');
+    e.currentTarget.setAttribute('aria-expanded', String(open));
+    const from = open ? 0 : hourly.getBoundingClientRect().height;
+    hourly.getAnimations().forEach(a => a.cancel());
+    hourly.classList.add('show');
+    const a = animateHeight(hourly, from, open ? hourly.offsetHeight : 0, open ? SPRING_SMOOTH : EASE_OUT);
+    a.onfinish = () => {
+      hourly.style.overflow = '';
+      if (!open) hourly.classList.remove('show');
+      trimMiniChips();
+    };
+  });
+  Weather.subscribe(renderWeather);
+
+  // ───────── 폰 탭 전환 ─────────
+  const appEl = $('app');
+  function setTab(tab) {
+    appEl.dataset.tab = tab;
+    document.querySelectorAll('.tabbar [role="tab"]').forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === tab)));
+    Store.setUI({ tab });
+    if (tab === 'calendar') requestAnimationFrame(trimMiniChips);
+  }
+  document.querySelectorAll('.tabbar [role="tab"]').forEach(b => b.addEventListener('click', () => setTab(b.dataset.tab)));
+  if (ui.tab) setTab(ui.tab);
+
+  // ───────── 달력과 할 일 사이 폭 조절 ─────────
+  const tasksPane = $('tasks');
+  const splitter = $('splitter');
+  const TASKS_W = 360;
+  function setTasksWidth(px, save) {
+    const max = Math.max(280, innerWidth - 420);
+    const w = Math.round(clamp(px, 260, max));
+    appEl.style.setProperty('--tasks-w', `${w}px`);
+    if (save) Store.setUI({ tasksW: w });
+    return w;
+  }
+  if (ui.tasksW) setTasksWidth(ui.tasksW);
+
+  splitter.addEventListener('pointerdown', e => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const sx = e.clientX, w0 = tasksPane.offsetWidth;
+    let w = w0;
+    splitter.classList.add('active');
+    document.body.classList.add('col-resizing');
+    const move = ev => {
+      w = setTasksWidth(w0 - (ev.clientX - sx));
+      trimMiniChips();
+    };
+    const up = () => {
+      splitter.classList.remove('active');
+      document.body.classList.remove('col-resizing');
+      removeEventListener('pointermove', move);
+      removeEventListener('pointerup', up);
+      removeEventListener('pointercancel', up);
+      setTasksWidth(w, true);
+    };
+    addEventListener('pointermove', move);
+    addEventListener('pointerup', up);
+    addEventListener('pointercancel', up);
+  });
+  // 두 번 누르면 기본 폭으로
+  splitter.addEventListener('dblclick', () => {
+    const from = tasksPane.offsetWidth;
+    const to = setTasksWidth(TASKS_W, true);
+    tasksPane.animate([{ width: `${from}px` }, { width: `${to}px` }], motion(SPRING_SMOOTH));
+    setTimeout(trimMiniChips, 400);
+  });
+  splitter.addEventListener('keydown', e => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    e.preventDefault();
+    setTasksWidth(tasksPane.offsetWidth + (e.key === 'ArrowLeft' ? 24 : -24), true);
+    trimMiniChips();
+  });
+
+  // ───────── 달력 ─────────
+  const grid = $('grid');
+
+  function renderMonth() {
+    $('month-label').textContent = `${viewMonth.getFullYear()}년 ${viewMonth.getMonth() + 1}월`;
+
+    const first = addDays(viewMonth, -viewMonth.getDay());
+    const todayKey = keyOf(new Date());
+    const openKeys = new Set(wins.map(w => w.key));
+    const frag = document.createDocumentFragment();
+
+    for (let i = 0; i < 42; i++) {
+      const d = addDays(first, i);
+      const key = keyOf(d);
+      const cell = el('button', 'cell');
+      cell.type = 'button';
+      cell.dataset.key = key;
+      if (d.getMonth() !== viewMonth.getMonth()) cell.classList.add('outside');
+      if (d.getDay() === 0) cell.classList.add('sun');
+      if (d.getDay() === 6) cell.classList.add('sat');
+      if (key === todayKey) cell.classList.add('today');
+      if (openKeys.has(key)) cell.classList.add('open');
+
+      const stacks = Store.getDay(key).stacks.sort((a, b) => a.start - b.start);
+      const dues = deadlinesOn(key);
+      let label = `${d.getMonth() + 1}월 ${d.getDate()}일`;
+      if (stacks.length) label += `, 스택 ${stacks.length}개`;
+      if (dues.length) label += `, 마감 ${dues.length}개`;
+      cell.setAttribute('aria-label', label);
+
+      cell.append(el('span', 'num', d.getDate()));
+
+      if (stacks.length || dues.length) {
+        const list = el('div', 'chips-mini');
+        const dots = el('div', 'dots');
+        dues.forEach(({ it, info }) => {
+          const c = SOURCE_INFO[it.source].color;
+          const chip = el('span', 'mini due', `${fmtTime(info.min)} ${it.title}`);
+          chip.style.setProperty('--c', c);
+          list.append(chip);
+          const dot = el('span', 'dot due');
+          dot.style.setProperty('--c', c);
+          dots.append(dot);
+        });
+        stacks.forEach((s, idx) => {
+          const chip = el('span', 'mini', s.name);
+          chip.style.setProperty('--c', s.color);
+          list.append(chip);
+          if (idx < 4) {
+            const dot = el('span', 'dot');
+            dot.style.setProperty('--c', s.color);
+            dots.append(dot);
+          }
+        });
+        cell.append(list, dots);
+      }
+      frag.append(cell);
+    }
+    grid.replaceChildren(frag);
+    requestAnimationFrame(trimMiniChips);
+  }
+
+  // 칸에 다 안 들어가는 칩은 숨기고 +n으로 표시
+  function trimMiniChips() {
+    grid.querySelectorAll('.chips-mini').forEach(list => {
+      list.querySelector('.mini-more')?.remove();
+      const chips = [...list.children];
+      chips.forEach(c => { c.hidden = false; });
+      if (!list.offsetHeight || list.scrollHeight <= list.clientHeight) return;
+      const more = el('span', 'mini-more');
+      list.append(more);
+      let hiddenCount = 0;
+      for (let i = chips.length - 1; i >= 0 && list.scrollHeight > list.clientHeight; i--) {
+        chips[i].hidden = true;
+        hiddenCount++;
+        more.textContent = `+${hiddenCount}`;
+      }
+    });
+  }
+
+  function slideGrid(dir) {
+    grid.animate(
+      [{ transform: `translateX(${dir * 40}px)`, opacity: 0 }, { transform: 'none', opacity: 1 }],
+      motion(SPRING_SMOOTH)
+    );
+  }
+  function shiftMonth(delta) {
+    viewMonth = new Date(viewMonth.getFullYear(), viewMonth.getMonth() + delta, 1);
+    renderMonth();
+    slideGrid(delta);
+  }
+  // 그 날짜가 있는 달로 넘긴다. 넘겼으면 true
+  function showMonthOf(d, animate) {
+    const delta = (d.getFullYear() - viewMonth.getFullYear()) * 12 + d.getMonth() - viewMonth.getMonth();
+    if (!delta) return false;
+    viewMonth = new Date(d.getFullYear(), d.getMonth(), 1);
+    renderMonth();
+    if (animate) slideGrid(Math.sign(delta));
+    return true;
+  }
+
+  function goToday() {
+    if (innerWidth < 900) setTab('calendar');
+    showMonthOf(new Date(), true);
+    grid.querySelector('.cell.today')?.animate(
+      [{ transform: 'scale(1)' }, { transform: 'scale(1.1)' }, { transform: 'scale(1)' }],
+      motion(SPRING_BOUNCY)
+    );
+  }
+
+  $('prev-month').addEventListener('click', () => shiftMonth(-1));
+  $('next-month').addEventListener('click', () => shiftMonth(1));
+  $('today-btn').addEventListener('click', goToday);
+
+  grid.addEventListener('click', e => {
+    const cell = e.target.closest('.cell');
+    if (cell) openDay(cell.dataset.key, cell);
+  });
+
+  // 좌우로 밀어서 달 넘기기
+  let touchStart = null;
+  grid.addEventListener('touchstart', e => {
+    const t = e.touches[0];
+    touchStart = { x: t.clientX, y: t.clientY };
+  }, { passive: true });
+  grid.addEventListener('touchend', e => {
+    if (!touchStart) return;
+    const t = e.changedTouches[0];
+    const dx = t.clientX - touchStart.x, dy = t.clientY - touchStart.y;
+    touchStart = null;
+    if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5) shiftMonth(dx < 0 ? 1 : -1);
+  });
+
+  // ───────── 계정 메뉴 ─────────
+  const taskList = $('task-list');
+  const accountsWrap = $('accounts-wrap');
+  const accountsEl = $('accounts');
+
+  function timeAgo(t) {
+    const m = Math.round((Date.now() - t) / 60000);
+    if (m < 1) return '방금';
+    if (m < 60) return `${m}분 전`;
+    const h = Math.round(m / 60);
+    return h < 24 ? `${h}시간 전` : `${Math.round(h / 24)}일 전`;
+  }
+
+  let autoRenew = ui.autoRenew !== false;
+
+  function renderAccounts() {
+    const frag = document.createDocumentFragment();
+    const icons = {
+      'google-personal': ['G', '#4285f4'],
+      'google-school': ['G', '#34a853'],
+      'microsoft-school': ['T', '#5b5fc7'],
+    };
+    const rows = [
+      ...Google.status().map(a => ({ ...a, provider: Google })),
+      { ...Microsoft.status(), provider: Microsoft },
+    ];
+    rows.forEach(acc => {
+      const row = el('div', 'account');
+      const icon = el('span', 'account-icon', icons[acc.id][0]);
+      icon.style.background = icons[acc.id][1];
+      const text = el('div', 'account-text');
+      let sub;
+      if (acc.busy) sub = '불러오는 중…';
+      else if (acc.connected) {
+        sub = acc.email || '연결됨';
+        if (acc.expired) sub += autoRenew ? ' · 다음 클릭 때 갱신' : ' · 로그인 만료';
+        else if (acc.lastSync) sub += ` · ${timeAgo(acc.lastSync)} 갱신`;
+      } else sub = `${acc.services.join(' · ')} · 연결 안 됨`;
+      text.append(el('div', 'account-name', acc.label), el('div', 'account-sub', sub));
+      if (acc.error) text.append(el('div', 'account-error', acc.error));
+
+      const actions = el('div', 'account-actions');
+      const main = el('button', `pill-btn${acc.connected ? ' ghost' : ''}`, acc.connected ? '새로고침' : '연결');
+      main.type = 'button';
+      main.disabled = acc.busy;
+      main.addEventListener('click', () => {
+        if (!acc.provider.configured) {
+          toast('config.js에 이 계정의 클라이언트 ID를 아직 넣지 않았다.');
+          return;
+        }
+        acc.provider.connect(acc.id);
+      });
+      actions.append(main);
+      if (acc.connected) {
+        const off = el('button', 'link-btn', '연결 해제');
+        off.type = 'button';
+        off.addEventListener('click', () => acc.provider.disconnect(acc.id));
+        actions.append(off);
+      }
+      row.append(icon, text, actions);
+      frag.append(row);
+    });
+
+    // 자동 갱신 설정
+    const opt = el('label', 'account account-opt');
+    const box = el('input');
+    box.type = 'checkbox';
+    box.checked = autoRenew;
+    box.addEventListener('change', () => {
+      autoRenew = box.checked;
+      Store.setUI({ autoRenew });
+      renderAccounts();
+    });
+    const optText = el('div', 'account-text');
+    optText.append(
+      el('div', 'account-name', '로그인 자동 갱신'),
+      el('div', 'account-sub', '로그인이 끝나 갈 때 다음 클릭에 맞춰 로그인 창이 잠깐 열렸다 닫힌다'),
+    );
+    opt.append(optText, box);
+    frag.append(opt);
+    accountsEl.replaceChildren(frag);
+  }
+
+  // 계정 메뉴를 펴고 접는다. 접을 때도 같은 곡선으로 높이가 줄어 아래 목록이 따라 올라온다
+  $('accounts-btn').addEventListener('click', e => {
+    const btn = e.currentTarget;
+    const open = btn.getAttribute('aria-expanded') !== 'true';
+    btn.setAttribute('aria-expanded', String(open));
+    const from = accountsWrap.hidden ? 0 : accountsWrap.getBoundingClientRect().height;
+    accountsWrap.getAnimations().forEach(a => a.cancel());
+    accountsEl.getAnimations().forEach(a => a.cancel());
+    accountsWrap.hidden = false;
+    const full = accountsWrap.offsetHeight;
+    if (open) {
+      animateHeight(accountsWrap, from, full, SPRING_SMOOTH);
+      accountsEl.animate([{ opacity: from / full, transform: `translateY(${-8 * (1 - from / full)}px)` }, { opacity: 1, transform: 'none' }], motion(SPRING_SMOOTH));
+    } else {
+      const a = animateHeight(accountsWrap, from, 0, EASE_OUT);
+      accountsEl.animate([{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'translateY(-8px)' }], { ...motion(EASE_OUT), fill: 'forwards' });
+      a.onfinish = () => {
+        accountsWrap.hidden = true;
+        accountsWrap.style.overflow = '';
+        accountsEl.getAnimations().forEach(x => x.cancel());
+      };
+    }
+  });
+
+  // 로그인 자동 갱신: 팝업은 사용자 클릭 안에서만 열 수 있어서, 만료가 가까운 계정이 있으면 다음 클릭을 빌린다
+  document.addEventListener('click', e => {
+    if (!autoRenew || e.target.closest('.account')) return;
+    const g = Google.renewable();
+    if (g) Google.renew(g);
+    else if (Microsoft.renewable()) Microsoft.renew();
+  }, true);
+
+  // ───────── 할 일 패널 ─────────
+  function relLabel(ms, dateOnly) {
+    const past = ms < 0;
+    const a = Math.abs(ms);
+    const min = Math.round(a / 60000);
+    if (dateOnly) {
+      const days = Math.round(a / 86400000);
+      return past ? (days ? `${days}일 지남` : '오늘') : (days ? `D-${days}` : '오늘');
+    }
+    if (min < 60) return past ? `${min}분 지남` : `${min}분 남음`;
+    const h = Math.round(min / 60);
+    if (h < 24) return past ? `${h}시간 지남` : `${h}시간 남음`;
+    const days = Math.floor(h / 24);
+    return past ? `${days}일 지남` : `D-${days}`;
+  }
+
+  function dueLabel(d, hasTime) {
+    const today = new Date();
+    const k = keyOf(d);
+    let day;
+    if (k === keyOf(today)) day = '오늘';
+    else if (k === keyOf(addDays(today, 1))) day = '내일';
+    else if (k === keyOf(addDays(today, -1))) day = '어제';
+    else day = `${d.getMonth() + 1}/${d.getDate()}(${WD_SHORT[d.getDay()]})`;
+    return hasTime ? `${day} ${pad(d.getHours())}:${pad(d.getMinutes())}` : day;
+  }
+
+  // 할 일 묶음. 항목은 위에서부터 처음 맞는 묶음에 들어간다
+  const SECTIONS = [
+    { id: 'school', title: '학교', sub: 'Classroom · Teams', match: it => it.account === 'school' },
+    { id: 'outside', title: '학교 외', sub: 'Classroom', match: it => it.source === 'classroom' },
+    { id: 'mine', title: 'Tasks', sub: '내 할 일 목록', match: it => it.source === 'tasks', canAdd: true },
+  ];
+  const collapsed = new Set(ui.collapsed || ['school', 'outside']);
+  const itemsById = new Map();
+  let sectionBusy = 0;     // 묶음이 펴지거나 접히는 중이면 다시 그리기를 미룬다
+  let renderPending = false;
+
+  // 기한(시각까지)이 가까운 순서. 날짜만 있는 항목은 그날 끝으로 본다. 기한 없는 항목은 맨 아래
+  function dueTime(it) {
+    if (!it.due) return null;
+    const d = new Date(it.due);
+    return it.hasTime ? d : new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59);
+  }
+  const dueMs = it => { const t = dueTime(it); return t ? t.getTime() : Infinity; };
+
+  // 묶음 id → 기한 순으로 정렬한 항목
+  function groupItems(all) {
+    const out = new Map(SECTIONS.map(def => [def.id, []]));
+    [...all].sort((a, b) => dueMs(a) - dueMs(b)).forEach(it => {
+      const def = SECTIONS.find(d => d.match(it));
+      if (def) out.get(def.id).push(it);
+    });
+    return out;
+  }
+
+  function taskRow(it, now) {
+    const t = dueTime(it);
+    const src = SOURCE_INFO[it.source];
+    const row = el('div', 'task');
+    row.dataset.id = it.id;
+    row.style.setProperty('--c', src.color);
+    if (t && t < now) row.classList.add('overdue');
+    else if (t && t - now < 24 * 3600 * 1000) row.classList.add('soon');
+
+    if (it.source === 'tasks' && (it.ref || it.account === 'local')) {
+      // 구글 Tasks 항목과 이 기기 할 일은 여기서 완료 처리할 수 있다
+      const check = el('button', 'task-check');
+      check.type = 'button';
+      check.setAttribute('aria-label', `${it.title} 완료`);
+      check.addEventListener('click', async ev => {
+        ev.stopPropagation();
+        check.classList.add('on');
+        try {
+          if (it.account === 'local') Sources.removeItem(it.id);
+          else await Google.completeTask(it);
+        } catch (err) {
+          check.classList.remove('on');
+          toast(err.message);
+        }
+      });
+      row.append(check);
+    } else {
+      row.append(el('span', 'task-bar'));
+    }
+
+    const main = el('div', 'task-main');
+    main.append(el('div', 'task-title', it.title));
+    const meta = [];
+    if (it.source === 'teams') meta.push('Teams');
+    if (it.course) meta.push(it.course);
+    if (it.account === 'local') meta.push('이 기기');
+    if (meta.length) main.append(el('div', 'task-meta', meta.join(' · ')));
+    row.append(main);
+
+    const due = el('div', 'task-due');
+    if (t) {
+      due.append(el('strong', null, relLabel(t - now, !it.hasTime)));
+      due.append(el('span', null, dueLabel(new Date(it.due), it.hasTime)));
+    }
+    row.append(due);
+
+    if (it.link) {
+      const a = el('a', 'task-link');
+      a.href = it.link;
+      a.target = '_blank';
+      a.rel = 'noopener';
+      a.setAttribute('aria-label', `${src.label}에서 열기`);
+      a.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>';
+      a.addEventListener('click', ev => ev.stopPropagation());
+      row.append(a);
+    }
+    return row;
+  }
+
+  // 할 일 추가 입력줄. 다시 그려도 입력 중인 내용이 남도록 한 번만 만든다
+  const addForm = (() => {
+    const f = el('form', 'task-add');
+    f.hidden = true;
+    f.autocomplete = 'off';
+    const title = el('input', 'task-add-title');
+    title.placeholder = '새 할 일';
+    title.maxLength = 120;
+    title.enterKeyHint = 'done';
+    const date = el('input', 'task-add-date');
+    date.type = 'date';
+    date.setAttribute('aria-label', '기한 날짜(선택)');
+    const ok = el('button', 'pill-btn', '추가');
+    ok.type = 'submit';
+    f.append(title, date, ok);
+    f.addEventListener('submit', async e => {
+      e.preventDefault();
+      const name = title.value.trim();
+      if (!name) { title.focus(); return; }
+      ok.disabled = true;
+      try {
+        if (Google.canAddTask()) {
+          await Google.addTask(name, date.value || null);
+          toast('Google Tasks에 추가했다');
+        } else {
+          Sources.addLocal(name, date.value || null);
+          toast('이 기기에 저장했다. Google 개인 계정을 연결해 두면 Tasks에 바로 들어간다');
+        }
+        title.value = '';
+        date.value = '';
+        title.focus();
+      } catch (err) {
+        toast(err.message);
+      } finally {
+        ok.disabled = false;
+      }
+    });
+    f.addEventListener('keydown', e => { if (e.key === 'Escape') { e.stopPropagation(); toggleAddForm(false); } });
+    return { f, title };
+  })();
+
+  function toggleAddForm(open) {
+    const sec = taskList.querySelector('.sec[data-sec="mine"]');
+    if (open && collapsed.has('mine')) {
+      addForm.f.hidden = false;
+      toggleSection('mine');
+    } else {
+      const body = sec && sec.querySelector('.sec-body');
+      const from = body ? body.offsetHeight : 0;
+      addForm.f.hidden = !open;
+      if (body) animateHeight(body, from, body.offsetHeight, open ? SPRING_SMOOTH : EASE_OUT);
+    }
+    sec?.querySelector('.sec-add')?.setAttribute('aria-expanded', String(open));
+    if (open) setTimeout(() => addForm.title.focus(), 30);
+  }
+
+  function fillBody(body, def, items, now) {
+    body.replaceChildren();
+    if (def.canAdd) body.append(addForm.f);
+    if (!items.length) {
+      body.append(el('p', 'sec-empty', def.canAdd ? '할 일이 없다. + 버튼으로 추가한다' : '남은 과제가 없다'));
+      return;
+    }
+    if (collapsed.has(def.id)) {
+      // 접힌 묶음: 가장 급한 하나가 맨 앞에 있고 나머지는 뒤에 겹친 카드로 보인다
+      const pile = el('div', 'pile');
+      pile.dataset.n = Math.min(items.length, 3);
+      for (let i = Math.min(items.length, 3) - 1; i >= 1; i--) pile.append(el('div', `pile-layer l${i}`));
+      const front = taskRow(items[0], now);
+      front.classList.add('front');
+      pile.append(front);
+      if (items.length > 1) pile.append(el('span', 'pile-more', `+${items.length - 1}`));
+      body.append(pile);
+    } else {
+      const list = el('div', 'sec-list');
+      items.forEach(it => list.append(taskRow(it, now)));
+      body.append(list);
+    }
+  }
+
+  function renderTasks() {
+    if (sectionBusy || tdrag) { renderPending = true; return; }
+    renderPending = false;
+    const all = Sources.all().filter(it => !it.done);
+    const now = new Date();
+    const frag = document.createDocumentFragment();
+    itemsById.clear();
+    all.forEach(it => itemsById.set(it.id, it));
+
+    if (Sources.isDemo()) {
+      const note = el('div', 'demo-note');
+      note.append(el('span', null, '예시 데이터를 보여 주는 중'));
+      const off = el('button', null, '끄기');
+      off.type = 'button';
+      off.addEventListener('click', () => { Sources.setDemo(false); Store.setUI({ demo: false }); });
+      note.append(off);
+      frag.append(note);
+    }
+
+    const anyConnected = Google.status().some(a => a.connected) || Microsoft.status().connected;
+    if (!anyConnected && !Sources.isDemo() && !all.some(it => it.account !== 'local')) {
+      const empty = el('div', 'empty');
+      empty.append(el('strong', null, '연결된 계정이 없다'));
+      empty.append(document.createTextNode('오른쪽 위 사람 모양 버튼에서 계정을 연결하면 과제와 할 일이 여기에 모인다.'));
+      empty.append(el('br'));
+      const b = el('button', 'pill-btn', '예시로 미리 보기');
+      b.type = 'button';
+      b.addEventListener('click', () => { Sources.setDemo(true); Store.setUI({ demo: true }); });
+      empty.append(b);
+      frag.append(empty);
+    }
+
+    const groups = groupItems(all);
+    SECTIONS.forEach(def => {
+      const items = groups.get(def.id);
+      if (!items.length && !def.canAdd) return;
+
+      const sec = el('section', 'sec');
+      sec.dataset.sec = def.id;
+      const head = el('div', 'sec-head');
+      const toggle = el('button', 'sec-toggle');
+      toggle.type = 'button';
+      toggle.setAttribute('aria-expanded', String(!collapsed.has(def.id)));
+      toggle.innerHTML = '<svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg>';
+      toggle.append(el('span', 'sec-title', def.title), el('span', 'sec-sub', def.sub));
+      const overdue = items.filter(it => { const t = dueTime(it); return t && t < now; }).length;
+      const count = el('span', `sec-count${overdue ? ' alert' : ''}`, items.length);
+      if (overdue) count.title = `지난 마감 ${overdue}개`;
+      toggle.append(count);
+      head.append(toggle);
+      if (def.canAdd) {
+        const add = el('button', 'icon-btn sec-add');
+        add.type = 'button';
+        add.setAttribute('aria-label', '할 일 추가');
+        add.setAttribute('aria-expanded', String(!addForm.f.hidden));
+        add.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
+        add.addEventListener('click', () => toggleAddForm(addForm.f.hidden));
+        head.append(add);
+      }
+      const body = el('div', 'sec-body');
+      fillBody(body, def, items, now);
+      sec.append(head, body);
+      frag.append(sec);
+    });
+    // 입력줄을 옮기면 포커스가 풀리니 다시 잡아 준다
+    const focused = addForm.f.contains(document.activeElement) ? document.activeElement : null;
+    taskList.replaceChildren(frag);
+    if (focused) focused.focus({ preventScroll: true });
+  }
+
+  // 묶음 펴기·접기. 펼 때는 겹쳐 있던 카드들이 제자리로 튕기듯 퍼지고, 접을 때는 맨 앞 카드 뒤로 모인다
+  function toggleSection(id) {
+    const sec = taskList.querySelector(`.sec[data-sec="${id}"]`);
+    if (!sec) return;
+    const def = SECTIONS.find(s => s.id === id);
+    const body = sec.querySelector('.sec-body');
+    const opening = collapsed.has(id);
+    if (opening) collapsed.delete(id); else collapsed.add(id);
+    Store.setUI({ collapsed: [...collapsed] });
+    sec.querySelector('.sec-toggle').setAttribute('aria-expanded', String(opening));
+
+    const from = body.getBoundingClientRect().height;
+    body.getAnimations({ subtree: true }).forEach(a => a.cancel());
+    const now = new Date();
+    const sorted = groupItems(Sources.all().filter(it => !it.done)).get(id);
+
+    sectionBusy++;
+    const done = () => {
+      sectionBusy = Math.max(0, sectionBusy - 1);
+      if (!sectionBusy && renderPending) renderTasks();
+    };
+
+    if (opening) {
+      fillBody(body, def, sorted, now);
+      const to = body.offsetHeight;
+      animateHeight(body, from, to, SPRING_ELASTIC);
+      const rows = [...body.querySelectorAll('.sec-list .task')];
+      const pileTop = rows.length ? rows[0].offsetTop : 0;
+      let last = null;
+      rows.forEach((r, i) => {
+        const k = Math.min(i, 2);
+        const dy = pileTop + k * 5 - r.offsetTop;
+        r.style.zIndex = String(rows.length - i);
+        last = r.animate([
+          { transform: `translateY(${dy}px) scale(${1 - k * 0.04})`, opacity: i > 2 ? 0 : 1 },
+          { transform: 'none', opacity: 1 },
+        ], { ...motion(SPRING_ELASTIC), delay: REDUCED.matches ? 0 : i * 26, fill: 'backwards' });
+      });
+      const finish = () => { rows.forEach(r => { r.style.zIndex = ''; }); done(); };
+      if (last) last.finished.then(finish, finish); else finish();
+    } else {
+      const rows = [...body.querySelectorAll('.sec-list .task')];
+      if (!rows.length) { fillBody(body, def, sorted, now); done(); return; }
+      const pileTop = rows[0].offsetTop;
+      // 접힌 뒤의 높이를 미리 재 둔다
+      const probe = el('div', 'sec-body');
+      probe.style.cssText = `position:absolute;visibility:hidden;width:${body.offsetWidth}px`;
+      fillBody(probe, def, sorted, now);
+      if (def.canAdd) body.prepend(addForm.f); // fillBody가 가져간 입력줄을 되돌린다
+      sec.append(probe);
+      const to = probe.offsetHeight;
+      probe.remove();
+      rows.forEach((r, i) => {
+        const k = Math.min(i, 2);
+        r.style.zIndex = String(rows.length - i);
+        r.animate([
+          { transform: 'none', opacity: 1 },
+          { transform: `translateY(${pileTop + k * 5 - r.offsetTop}px) scale(${1 - k * 0.04})`, opacity: i > 2 ? 0 : 1 },
+        ], { ...motion(EASE_OUT), fill: 'forwards' });
+      });
+      const a = animateHeight(body, from, to, EASE_OUT);
+      a.onfinish = () => {
+        body.style.overflow = '';
+        fillBody(body, def, sorted, now);
+        // 앞 카드가 살짝 내려앉는 느낌
+        body.querySelector('.pile')?.animate([{ transform: 'translateY(-3px)' }, { transform: 'none' }], motion(SPRING_BOUNCY));
+        done();
+      };
+      a.oncancel = done;
+    }
+  }
+
+  taskList.addEventListener('click', e => {
+    if (suppressRowClick) return;
+    const toggle = e.target.closest('.sec-toggle');
+    if (toggle) { toggleSection(toggle.closest('.sec').dataset.sec); return; }
+    const front = e.target.closest('.pile');
+    if (front && !e.target.closest('button, a')) { toggleSection(front.closest('.sec').dataset.sec); return; }
+    const row = e.target.closest('.sec-list .task');
+    if (!row || e.target.closest('button, a')) return;
+    const it = itemsById.get(row.dataset.id);
+    if (!it || !it.due) return;
+    const d = new Date(it.due);
+    const key = keyOf(d);
+    showMonthOf(d, false);
+    const cell = grid.querySelector(`.cell[data-key="${key}"]`);
+    openDay(key, cell && cell.offsetParent ? cell : row, it.hasTime ? dueInfo(it).min : null);
+  });
+
+  // ───────── 할 일을 끌어 시간표에 넣기 ─────────
+  // PC는 바로 끌고, 폰은 길게 눌러 집어 든다. 열린 시간표 창에 놓으면 그 시각에,
+  // 달력 칸에 놓으면 그 날짜 창을 열고 스택 시트를 띄운다. 길이와 색은 시트에서 정한다.
+  // 폰에서 끄는 중에 아래 '캘린더' 탭 위에 잠깐 머물면 캘린더로 넘어간다.
+  const ghost = $('task-ghost');
+  let tdrag = null;
+  let suppressRowClick = false;
+
+  taskList.addEventListener('pointerdown', e => {
+    if (e.button !== 0 || tdrag) return;
+    const row = e.target.closest('.sec-list .task');
+    if (!row || e.target.closest('button, a, input')) return;
+    const it = itemsById.get(row.dataset.id);
+    if (!it) return;
+    tdrag = { row, it, sx: e.clientX, sy: e.clientY, x: e.clientX, y: e.clientY, type: e.pointerType, active: false, timer: null, target: null, hoverTimer: null, hoverEl: null, raf: 0 };
+    if (e.pointerType !== 'mouse') tdrag.timer = setTimeout(beginTaskDrag, 380);
+    addEventListener('pointermove', onTaskDragMove);
+    addEventListener('pointerup', onTaskDragEnd);
+    addEventListener('pointercancel', onTaskDragCancel);
+  });
+  taskList.addEventListener('contextmenu', e => { if (e.target.closest('.sec-list .task')) e.preventDefault(); });
+
+  function beginTaskDrag() {
+    const d = tdrag;
+    if (!d) return;
+    clearTimeout(d.timer);
+    d.active = true;
+    d.row.classList.add('picked');
+    const color = SOURCE_INFO[d.it.source].stack;
+    ghost.style.setProperty('--c', color);
+    ghost.replaceChildren(el('strong', null, d.it.title), el('span', null, `${fmtDur(DROP_MIN)} · 놓을 곳으로`));
+    ghost.hidden = false;
+    moveGhost();
+    ghost.animate([{ transform: `${ghostPos()} scale(0.8)`, opacity: 0 }, { transform: `${ghostPos()} scale(1)`, opacity: 1 }], motion(SPRING_BOUNCY));
+    document.body.classList.add('dragging');
+    if (d.type !== 'mouse' && navigator.vibrate) navigator.vibrate(8);
+    d.raf = requestAnimationFrame(taskDragScroll);
+  }
+
+  const ghostPos = () => `translate(${tdrag.x + 14}px, ${tdrag.y + 14}px)`;
+  function moveGhost() { ghost.style.transform = ghostPos(); }
+
+  function onTaskDragMove(e) {
+    const d = tdrag;
+    if (!d) return;
+    d.x = e.clientX;
+    d.y = e.clientY;
+    if (!d.active) {
+      if (Math.hypot(d.x - d.sx, d.y - d.sy) > (d.type === 'mouse' ? 5 : 8)) {
+        if (d.type === 'mouse') beginTaskDrag();
+        else { cleanupTaskDrag(); return; } // 터치로 그냥 민 것은 스크롤
+      } else return;
+    }
+    e.preventDefault();
+    moveGhost();
+    updateDropTarget();
+  }
+
+  // 놓을 곳 찾기
+  function updateDropTarget() {
+    const d = tdrag;
+    const hit = document.elementFromPoint(d.x, d.y);
+    let target = null;
+    const winEl = hit && hit.closest('.win');
+    const w = winEl && winOf.get(winEl);
+    if (w && w.mode === 'open' && hit.closest('.win-body')) {
+      const r = w.stacks.getBoundingClientRect();
+      const start = clamp(Math.floor((d.y - r.top) / PPM / 15) * 15, 0, DAY_MIN - DROP_MIN);
+      target = { kind: 'win', w, start };
+    } else if (hit && hit.closest('.cell')) {
+      target = { kind: 'cell', cell: hit.closest('.cell') };
+    }
+
+    // 미리보기 표시
+    wins.forEach(x => x.showDropPreview(target && target.kind === 'win' && target.w === x ? target.start : null, SOURCE_INFO[d.it.source].stack));
+    grid.querySelectorAll('.cell.drop-target').forEach(c => { if (!target || target.cell !== c) c.classList.remove('drop-target'); });
+    if (target && target.kind === 'cell') target.cell.classList.add('drop-target');
+    ghost.querySelector('span').textContent = target
+      ? target.kind === 'win' ? `${fmtTime(target.start)}부터 ${fmtDur(DROP_MIN)}` : `${target.cell.getAttribute('aria-label').split(',')[0]}에 넣기`
+      : `${fmtDur(DROP_MIN)} · 놓을 곳으로`;
+    d.target = target;
+
+    // 탭 버튼이나 최소화된 창 위에 잠깐 머물면 열어 준다
+    const spring = hit && (hit.closest('.tabbar [data-tab="calendar"]') || hit.closest('.dock-item'));
+    if (spring !== d.hoverEl) {
+      clearTimeout(d.hoverTimer);
+      d.hoverEl = spring;
+      if (spring) {
+        d.hoverTimer = setTimeout(() => {
+          if (!tdrag || tdrag.hoverEl !== spring) return;
+          if (spring.matches('.dock-item')) spring.click();
+          else setTab('calendar');
+        }, 550);
+      }
+    }
+  }
+
+  // 시간표 창의 위·아래 가장자리 근처에서는 저절로 스크롤
+  function taskDragScroll() {
+    const d = tdrag;
+    if (!d || !d.active) return;
+    if (d.target && d.target.kind === 'win') {
+      const sc = d.target.w.scroll;
+      const r = sc.getBoundingClientRect();
+      let v = 0;
+      if (d.y < r.top + 48) v = -Math.ceil((r.top + 48 - d.y) / 4);
+      else if (d.y > r.bottom - 48) v = Math.ceil((d.y - (r.bottom - 48)) / 4);
+      if (v) { sc.scrollTop += v; updateDropTarget(); }
+    }
+    d.raf = requestAnimationFrame(taskDragScroll);
+  }
+
+  function cleanupTaskDrag() {
+    const d = tdrag;
+    if (!d) return;
+    clearTimeout(d.timer);
+    clearTimeout(d.hoverTimer);
+    cancelAnimationFrame(d.raf);
+    d.row.classList.remove('picked');
+    ghost.hidden = true;
+    ghost.getAnimations().forEach(a => a.cancel());
+    document.body.classList.remove('dragging');
+    wins.forEach(x => x.showDropPreview(null));
+    grid.querySelectorAll('.cell.drop-target').forEach(c => c.classList.remove('drop-target'));
+    removeEventListener('pointermove', onTaskDragMove);
+    removeEventListener('pointerup', onTaskDragEnd);
+    removeEventListener('pointercancel', onTaskDragCancel);
+    tdrag = null;
+    if (renderPending) renderTasks();
+  }
+
+  function onTaskDragEnd() {
+    const d = tdrag;
+    if (!d) return;
+    const { active, target, it } = d;
+    cleanupTaskDrag();
+    if (!active) return;
+    // 끌기를 끝낸 뒤 따라오는 click은 무시한다
+    suppressRowClick = true;
+    setTimeout(() => { suppressRowClick = false; }, 0);
+    if (!target) return;
+    const prefill = { name: it.title, minutes: DROP_MIN, color: SOURCE_INFO[it.source].stack, taskId: it.id };
+    if (target.kind === 'win') {
+      target.w.focus();
+      openSheet(target.w, { ...prefill, start: target.start });
+    } else {
+      const key = target.cell.dataset.key;
+      const w = openDay(key, target.cell);
+      if (!w) return;
+      // 그날이 마감인 과제면 마감 한 시간 전에 끝나도록 놓는다
+      const info = dueInfo(it);
+      const start = info && it.hasTime && info.key === key ? clamp(info.min - DROP_MIN - 60, 0, DAY_MIN - DROP_MIN) : undefined;
+      openSheet(w, { ...prefill, start });
+    }
+  }
+
+  function onTaskDragCancel() { cleanupTaskDrag(); }
+
+  // ───────── 하루 시간표 창(여러 개) ─────────
+  const winLayer = $('windows');
+  const dockEl = $('dock');
+  const winTpl = $('win-tpl');
+  const winOf = new WeakMap();
+  const wins = [];           // 열려 있거나 최소화된 창. 뒤쪽일수록 위에 있다
+  const HOUR_PX = 64;
+  const PPM = HOUR_PX / 60;  // 1분당 픽셀
+
+  function defaultRect() {
+    const vw = innerWidth, vh = innerHeight;
+    if (vw < 640) return { x: 8, y: 8, w: vw - 16, h: vh - 92 };
+    const w = Math.min(520, vw - 40);
+    const h = Math.min(720, vh - 48);
+    return { x: Math.round((vw - w) / 2), y: Math.round((vh - h) / 2), w, h };
+  }
+
+  // 창이 화면 밖으로 나가지 않게. 제목 줄은 항상 잡을 수 있게 남긴다
+  function clampRect(r) {
+    const vw = innerWidth, vh = innerHeight;
+    const w = clamp(r.w, Math.min(300, vw - 16), vw - 16);
+    const h = clamp(r.h, Math.min(260, vh - 16), vh - 16);
+    return {
+      w, h,
+      x: clamp(r.x, -w + 120, vw - 120),
+      y: clamp(r.y, 0, vh - 56),
+    };
+  }
+
+  // a에서 b로 가는 transform(transform-origin 0 0 기준)
+  function flip(from, to) {
+    return `translate(${from.left - to.left}px, ${from.top - to.top}px) scale(${from.width / to.width}, ${from.height / to.height})`;
+  }
+
+  const activeWin = () => {
+    for (let i = wins.length - 1; i >= 0; i--) if (wins[i].mode === 'open') return wins[i];
+    return null;
+  };
+
+  function markOpenCells() {
+    const keys = new Set(wins.map(w => w.key));
+    grid.querySelectorAll('.cell').forEach(c => c.classList.toggle('open', keys.has(c.dataset.key)));
+  }
+
+  function restack() {
+    wins.forEach((w, i) => {
+      w.root.style.zIndex = String(10 + i);
+      w.root.classList.toggle('front', i === wins.length - 1 || wins.slice(i + 1).every(x => x.mode !== 'open'));
+    });
+  }
+
+  function renderDock() {
+    const mins = wins.filter(w => w.mode === 'min');
+    dockEl.hidden = !mins.length;
+    mins.forEach(w => { if (w.dockItem.parentNode !== dockEl) dockEl.append(w.dockItem); });
+  }
+
+  class DayWin {
+    constructor(key) {
+      this.key = key;
+      this.mode = 'closed';
+      this.selectedId = null;
+      this.pendingHighlight = null;
+      this.animating = false;
+      this.dropPreview = null;
+
+      const root = winTpl.content.firstElementChild.cloneNode(true);
+      const q = s => root.querySelector(s);
+      this.root = root;
+      this.body = q('.win-body');
+      this.scroll = q('.timeline-scroll');
+      this.hours = q('.hours');
+      this.stacks = q('.stacks');
+      this.deadlines = q('.deadlines');
+      this.nowLine = q('.now-line');
+      this.tip = q('.drag-tip');
+      this.titleEl = q('.win-date');
+      this.summaryEl = q('.win-summary');
+      this.todayBtn = q('[data-act="today"]');
+      winOf.set(root, this);
+
+      // 새 창은 앞 창에서 조금씩 비켜 연다
+      const base = clampRect(Store.getUI().win || defaultRect());
+      const n = wins.filter(w => w.mode === 'open').length;
+      const step = innerWidth < 640 ? 0 : 28;
+      this.rect = clampRect({ ...base, x: base.x + n * step, y: base.y + n * step });
+
+      this.dockItem = el('button', 'dock-item');
+      this.dockItem.type = 'button';
+      this.dockItem.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="15" rx="3"/><path d="M4 10h16M9 3v4M15 3v4"/></svg>';
+      this.dockLabel = el('span');
+      this.dockItem.append(this.dockLabel);
+      this.dockItem.addEventListener('click', () => this.restore());
+
+      root.addEventListener('pointerdown', () => this.focus(), true);
+      root.addEventListener('click', e => {
+        const b = e.target.closest('[data-act]');
+        if (!b) return;
+        const act = b.dataset.act;
+        if (act === 'prev') this.goDay(-1);
+        else if (act === 'next') this.goDay(1);
+        else if (act === 'today') this.setKey(keyOf(new Date()));
+        else if (act === 'min') this.minimize();
+        else if (act === 'close') this.close();
+        else if (act === 'add') openSheet(this, {});
+      });
+      this.bindMoveResize();
+      this.bindStacks();
+      winLayer.append(root);
+    }
+
+    applyRect() {
+      this.rect = clampRect(this.rect);
+      const s = this.root.style;
+      s.left = `${this.rect.x}px`;
+      s.top = `${this.rect.y}px`;
+      s.width = `${this.rect.w}px`;
+      s.height = `${this.rect.h}px`;
+    }
+
+    focus() {
+      const i = wins.indexOf(this);
+      if (i < 0 || i === wins.length - 1) return;
+      wins.splice(i, 1);
+      wins.push(this);
+      restack();
+    }
+
+    pulse() {
+      this.root.classList.remove('focus-pulse');
+      void this.root.offsetWidth;
+      this.root.classList.add('focus-pulse');
+    }
+
+    zoomIn(fromRect) {
+      const to = this.root.getBoundingClientRect();
+      const m = motion(SPRING_SMOOTH);
+      this.animating = true;
+      const a = this.root.animate([{ transform: flip(fromRect, to), opacity: 0.6 }, { transform: 'none', opacity: 1 }], m);
+      [...this.root.children].forEach(c => c.animate([{ opacity: 0 }, { opacity: 0, offset: 0.25 }, { opacity: 1 }], m));
+      return a.finished.finally(() => { this.animating = false; });
+    }
+
+    zoomOut(toRect) {
+      const root = this.root;
+      const from = root.getBoundingClientRect();
+      this.animating = true;
+      const opts = { duration: 300, easing: 'cubic-bezier(0.4, 0, 0.6, 1)', fill: 'forwards' };
+      const frames = toRect
+        ? [{ transform: 'none', opacity: 1 }, { transform: flip(toRect, from), opacity: 0.2 }]
+        : [{ transform: 'none', opacity: 1 }, { transform: 'scale(0.92)', opacity: 0 }];
+      if (!toRect) root.style.transformOrigin = '50% 50%';
+      [...root.children].forEach(c => c.animate([{ opacity: 1 }, { opacity: 0, offset: 0.5 }, { opacity: 0 }], opts));
+      return root.animate(frames, REDUCED.matches ? { duration: 1, fill: 'forwards' } : opts).finished.finally(() => {
+        root.hidden = true;
+        root.style.transformOrigin = '';
+        root.getAnimations({ subtree: true }).forEach(an => an.cancel());
+        this.animating = false;
+      });
+    }
+
+    open(fromRect, focusMin) {
+      this.mode = 'open';
+      this.root.hidden = false;
+      this.applyRect();
+      this.render();
+      this.scrollToFocus(focusMin);
+      restack();
+      markOpenCells();
+      this.zoomIn(fromRect);
+    }
+
+    restore() {
+      if (this.mode !== 'min' || this.animating) return;
+      const from = this.dockItem.getBoundingClientRect();
+      this.dockItem.remove();
+      this.mode = 'open';
+      this.focus();
+      renderDock();
+      this.root.hidden = false;
+      this.applyRect();
+      this.render();
+      restack();
+      this.zoomIn(from);
+    }
+
+    minimize() {
+      if (this.animating || this.mode !== 'open') return;
+      if (sheetWin === this) closeSheet(true);
+      const d = parseKey(this.key);
+      this.dockLabel.textContent = `${d.getMonth() + 1}/${d.getDate()}(${WD_SHORT[d.getDay()]})`;
+      this.mode = 'min';
+      renderDock();
+      restack();
+      this.zoomOut(this.dockItem.getBoundingClientRect());
+      this.dockItem.animate([{ transform: 'scale(0.6)', opacity: 0 }, { transform: 'none', opacity: 1 }], { ...motion(SPRING_BOUNCY), delay: 120, fill: 'backwards' });
+    }
+
+    close() {
+      if (this.animating) return;
+      if (sheetWin === this) closeSheet(true);
+      if (gesture && gesture.w === this) cleanupGesture();
+      const wasMin = this.mode === 'min';
+      this.mode = 'closed';
+      wins.splice(wins.indexOf(this), 1);
+      this.dockItem.remove();
+      renderDock();
+      restack();
+      markOpenCells();
+      if (wasMin) { this.root.remove(); return; }
+      const cell = appEl.dataset.tab === 'calendar' || innerWidth >= 900
+        ? grid.querySelector(`.cell[data-key="${this.key}"]`)
+        : null;
+      const target = cell && cell.offsetParent ? cell.getBoundingClientRect() : null;
+      this.zoomOut(target).then(() => this.root.remove());
+    }
+
+    setKey(key, dir) {
+      if (key === this.key) return;
+      dir = dir || (key > this.key ? 1 : -1);
+      this.key = key;
+      this.selectedId = null;
+      showMonthOf(parseKey(key), false);
+      markOpenCells();
+      this.render();
+      this.scrollToFocus(null);
+      this.body.animate([{ transform: `translateX(${dir * 30}px)`, opacity: 0 }, { transform: 'none', opacity: 1 }], motion(SPRING_SMOOTH));
+    }
+
+    goDay(delta) {
+      if (this.mode !== 'open' || this.animating) return;
+      this.setKey(keyOf(addDays(parseKey(this.key), delta)), delta);
+    }
+
+    // 제목 줄을 잡고 옮기기, 가장자리·모서리를 잡고 크기 바꾸기
+    bindMoveResize() {
+      const root = this.root;
+      const drag = (e, onMove, cls) => {
+        e.preventDefault();
+        document.body.classList.add(cls);
+        const up = () => {
+          document.body.classList.remove(cls);
+          removeEventListener('pointermove', onMove);
+          removeEventListener('pointerup', up);
+          removeEventListener('pointercancel', up);
+          Store.setUI({ win: this.rect });
+        };
+        addEventListener('pointermove', onMove);
+        addEventListener('pointerup', up);
+        addEventListener('pointercancel', up);
+      };
+      root.querySelector('.win-titlebar').addEventListener('pointerdown', e => {
+        if (e.button !== 0 || e.target.closest('button')) return;
+        const sx = e.clientX, sy = e.clientY, ox = this.rect.x, oy = this.rect.y;
+        drag(e, ev => {
+          this.rect = { ...this.rect, x: ox + ev.clientX - sx, y: oy + ev.clientY - sy };
+          this.applyRect();
+        }, 'dragging');
+      });
+      root.querySelector('.win-titlebar').addEventListener('dblclick', e => {
+        if (!e.target.closest('button')) this.minimize();
+      });
+      root.querySelectorAll('.rz').forEach(h => h.addEventListener('pointerdown', e => {
+        if (e.button !== 0) return;
+        const dir = h.dataset.dir;
+        const sx = e.clientX, sy = e.clientY, o = { ...this.rect };
+        const minW = Math.min(300, innerWidth - 16), minH = Math.min(260, innerHeight - 16);
+        drag(e, ev => {
+          const dx = ev.clientX - sx, dy = ev.clientY - sy;
+          let { x, y, w, h: hh } = o;
+          if (dir.includes('e')) w = o.w + dx;
+          if (dir.includes('s')) hh = o.h + dy;
+          if (dir.includes('w')) { w = clamp(o.w - dx, minW, o.x + o.w - 8); x = o.x + o.w - w; }
+          if (dir.includes('n')) { hh = clamp(o.h - dy, minH, o.y + o.h); y = o.y + o.h - hh; }
+          this.rect = { x, y, w: Math.max(minW, w), h: Math.max(minH, hh) };
+          this.applyRect();
+        }, 'resizing');
+      }));
+    }
+
+    bindStacks() {
+      const st = this.stacks;
+      st.addEventListener('contextmenu', e => { if (e.target.closest('.stack')) e.preventDefault(); });
+      st.addEventListener('pointerdown', e => startGesture(this, e));
+      // 빈 곳을 누르면: 선택 해제, 선택이 없었으면 그 시각에 새 스택
+      st.addEventListener('click', e => {
+        if (e.target !== st) return;
+        if (this.selectedId) { this.select(null); return; }
+        const y = e.clientY - st.getBoundingClientRect().top;
+        openSheet(this, { start: clamp(Math.floor(y / PPM / 15) * 15, 0, DAY_MIN - 15) });
+      });
+      st.addEventListener('keydown', e => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        const node = e.target.closest('.stack');
+        if (!node) return;
+        e.preventDefault();
+        openSheet(this, { id: node.dataset.id });
+      });
+    }
+
+    render() {
+      if (this.mode === 'closed') return;
+      const key = this.key;
+      const highlightId = this.pendingHighlight;
+      this.pendingHighlight = null;
+      const d = parseKey(key);
+      const day = Store.getDay(key);
+      const isToday = key === keyOf(new Date());
+      this.todayBtn.hidden = isToday;
+
+      const title = this.titleEl;
+      title.replaceChildren(document.createTextNode(`${d.getMonth() + 1}월 ${d.getDate()}일 `));
+      title.append(el('span', d.getDay() === 0 ? 'sun' : d.getDay() === 6 ? 'sat' : null, WEEKDAYS[d.getDay()]));
+      if (isToday) title.append(document.createTextNode(' '), el('span', 'today', '오늘'));
+      this.root.setAttribute('aria-label', `${d.getFullYear()}년 ${d.getMonth() + 1}월 ${d.getDate()}일 시간표`);
+
+      const dues = deadlinesOn(key);
+      const total = day.stacks.reduce((sum, s) => sum + s.minutes, 0);
+      const parts = [];
+      if (day.stacks.length) parts.push(`스택 ${day.stacks.length}개 · 합계 ${fmtDur(total)}`);
+      if (dues.length) parts.push(`마감 ${dues.length}개`);
+      this.summaryEl.textContent = parts.length ? parts.join(' · ') : '빈 곳을 누르거나 + 버튼으로 스택을 만든다';
+      if (this.mode === 'min') {
+        this.dockLabel.textContent = `${d.getMonth() + 1}/${d.getDate()}(${WD_SHORT[d.getDay()]})`;
+        return;
+      }
+
+      // 시간 눈금. 스택이 자정을 넘기면 그만큼 늘린다
+      const lastEnd = day.stacks.reduce((m, s) => Math.max(m, s.start + s.minutes), 0);
+      const endHour = Math.max(24, Math.ceil(lastEnd / 60));
+      if (this.hours.childElementCount !== endHour) {
+        const frag = document.createDocumentFragment();
+        for (let h = 0; h < endHour; h++) {
+          const row = el('div', 'hour');
+          row.append(el('span', null, h === 0 ? '' : `${pad(h % 24)}:00`));
+          frag.append(row);
+        }
+        this.hours.replaceChildren(frag);
+      }
+
+      // 기존 요소를 재사용해야 위치가 바뀔 때 부드럽게 움직인다
+      const st = this.stacks;
+      const existing = new Map([...st.querySelectorAll('.stack')].map(n => [n.dataset.id, n]));
+      st.querySelector('.empty-hint')?.remove();
+
+      day.stacks.forEach((s, i) => {
+        let node = existing.get(s.id);
+        const isNew = !node;
+        if (isNew) {
+          node = el('div', 'stack');
+          node.dataset.id = s.id;
+          const card = el('div', 'stack-card');
+          card.setAttribute('role', 'button');
+          card.tabIndex = 0;
+          card.append(el('span', 'stack-name'), el('span', 'stack-time'));
+          node.append(card);
+          ['t', 'b', 'l', 'r'].forEach(k => {
+            const hd = el('div', `sh ${k}`);
+            hd.dataset.h = k;
+            node.append(hd);
+          });
+        }
+        existing.delete(s.id);
+        placeStack(node, s);
+        node.classList.toggle('selected', s.id === this.selectedId);
+        node.querySelector('.stack-name').textContent = s.name;
+        node.querySelector('.stack-card').setAttribute('aria-label', `${s.name}, ${fmtTime(s.start)}부터 ${fmtDur(s.minutes)}`);
+        if (st.children[i] !== node) st.insertBefore(node, st.children[i] || null);
+        if (isNew && s.id === highlightId) {
+          node.animate([{ transform: 'scale(0.6)', opacity: 0 }, { transform: 'none', opacity: 1 }], motion(SPRING_BOUNCY));
+        }
+      });
+      existing.forEach(n => n.remove());
+
+      if (!day.stacks.length) {
+        const hint = el('div', 'empty-hint', '빈 시간을 누르거나 할 일을 끌어다 놓으면 스택이 생긴다');
+        hint.style.top = `${Store.DEFAULT_START * PPM + 4}px`;
+        st.append(hint);
+      }
+      if (this.dropPreview) st.append(this.dropPreview);
+
+      // 과제 마감선
+      this.deadlines.replaceChildren(...dues.map(({ it, info }) => {
+        const line = el('div', 'deadline');
+        line.style.top = `${info.min * PPM}px`;
+        line.style.setProperty('--c', SOURCE_INFO[it.source].color);
+        line.append(el('span', null, `마감 ${fmtTime(info.min)} · ${it.title}`));
+        return line;
+      }));
+
+      this.updateNowLine();
+    }
+
+    showDropPreview(start, color) {
+      if (start == null) {
+        this.dropPreview?.remove();
+        this.dropPreview = null;
+        return;
+      }
+      if (!this.dropPreview) {
+        this.dropPreview = el('div', 'drop-preview');
+        this.stacks.append(this.dropPreview);
+      }
+      const p = this.dropPreview;
+      p.style.setProperty('--c', color);
+      p.style.top = `${start * PPM}px`;
+      p.style.height = `${DROP_MIN * PPM}px`;
+      p.textContent = `${fmtTime(start)} – ${fmtTime(start + DROP_MIN)}`;
+    }
+
+    updateNowLine() {
+      const now = new Date();
+      if (this.key !== keyOf(now)) { this.nowLine.hidden = true; return; }
+      this.nowLine.hidden = false;
+      this.nowLine.style.top = `${(now.getHours() * 60 + now.getMinutes()) * PPM}px`;
+    }
+
+    // 처음 열 때 볼 위치: 지정한 시각, 오늘이면 지금, 아니면 첫 스택이나 08:00
+    scrollToFocus(min, smooth) {
+      if (min == null) {
+        const day = Store.getDay(this.key);
+        if (this.key === keyOf(new Date())) {
+          const n = new Date();
+          min = n.getHours() * 60 + n.getMinutes() - 60;
+        } else if (day.stacks.length) {
+          min = Math.min(...day.stacks.map(s => s.start)) - 30;
+        } else {
+          min = Store.DEFAULT_START - 30;
+        }
+      } else {
+        min -= 90;
+      }
+      this.scroll.scrollTo({ top: Math.max(0, min * PPM), behavior: smooth ? 'smooth' : 'auto' });
+    }
+
+    scrollToStack(id) {
+      const node = this.stacks.querySelector(`.stack[data-id="${id}"]`);
+      if (!node) return;
+      const sc = this.scroll;
+      const top = node.offsetTop, bottom = top + node.offsetHeight;
+      if (top < sc.scrollTop + 10 || bottom > sc.scrollTop + sc.clientHeight - 80) {
+        sc.scrollTo({ top: Math.max(0, top - 60), behavior: 'smooth' });
+      }
+    }
+
+    select(id) {
+      this.selectedId = id;
+      this.stacks.querySelectorAll('.stack').forEach(n => n.classList.toggle('selected', n.dataset.id === id));
+    }
+  }
+
+  // 날짜를 누르면 그 날짜 창을 연다. 이미 열려 있으면 앞으로 가져온다
+  function openDay(key, fromEl, focusMin) {
+    const existing = wins.find(w => w.key === key);
+    if (existing) {
+      if (existing.mode === 'min') existing.restore();
+      else { existing.focus(); existing.pulse(); }
+      if (focusMin != null) existing.scrollToFocus(focusMin, true);
+      return existing;
+    }
+    if (wins.length >= MAX_WINS) {
+      toast(`시간표 창은 ${MAX_WINS}개까지 열 수 있다. 하나를 닫고 연다`);
+      return null;
+    }
+    const w = new DayWin(key);
+    wins.push(w);
+    w.open(fromEl.getBoundingClientRect(), focusMin);
+    return w;
+  }
+
+  addEventListener('resize', () => {
+    wins.forEach(w => { if (w.mode === 'open') w.applyRect(); });
+    if (ui.tasksW || appEl.style.getPropertyValue('--tasks-w')) setTasksWidth(tasksPane.offsetWidth);
+    requestAnimationFrame(trimMiniChips);
+  });
+
+  function placeStack(node, s) {
+    const h = s.minutes * PPM;
+    node.style.top = `${s.start * PPM}px`;
+    node.style.height = `${h}px`;
+    node.style.left = `${s.x * 100}%`;
+    node.style.width = `${s.w * 100}%`;
+    node.style.setProperty('--c', s.color);
+    node.classList.toggle('compact', h < 44);
+    node.classList.toggle('tiny', h < 26);
+    node.querySelector('.stack-time').textContent = `${fmtTime(s.start)}–${fmtTime(s.start + s.minutes)} · ${fmtDur(s.minutes)}`;
+  }
+
+  setInterval(() => wins.forEach(w => { if (w.mode === 'open') w.updateNowLine(); }), 30 * 1000);
+
+  // ───────── 스택 끌기: 이동, 시간 조절, 폭 조절 ─────────
+  // 마우스는 바로 끌 수 있다. 터치는 길게 눌러서 집어 든다(그냥 밀면 스크롤).
+  // 손잡이(위·아래·왼쪽·오른쪽)는 터치든 마우스든 바로 끈다.
+  let gesture = null;
+
+  function startGesture(w, e) {
+    if (e.button !== 0 || gesture) return;
+    const node = e.target.closest('.stack');
+    if (!node) return;
+    const s = Store.getDay(w.key).stacks.find(x => x.id === node.dataset.id);
+    if (!s) return;
+    const handle = e.target.closest('.sh');
+    gesture = {
+      w, node, orig: s, cur: { ...s },
+      sx: e.clientX, sy: e.clientY, lx: e.clientX, ly: e.clientY,
+      scroll0: w.scroll.scrollTop,
+      type: e.pointerType, active: false, moved: false, timer: null, raf: 0,
+    };
+    if (handle) {
+      e.preventDefault();
+      begin(handle.dataset.h);
+    } else if (e.pointerType !== 'mouse') {
+      gesture.timer = setTimeout(() => begin('move'), 320);
+    }
+    addEventListener('pointermove', onGestureMove);
+    addEventListener('pointerup', onGestureEnd);
+    addEventListener('pointercancel', onGestureCancel);
+  }
+
+  // 집어 든 동안에는 터치 스크롤을 막는다
+  document.addEventListener('touchmove', e => {
+    if ((gesture && gesture.active) || (tdrag && tdrag.active)) e.preventDefault();
+  }, { passive: false });
+
+  function begin(mode) {
+    const g = gesture;
+    if (!g) return;
+    clearTimeout(g.timer);
+    g.active = true;
+    g.mode = mode;
+    g.node.classList.add('live');
+    if (mode === 'move') g.node.classList.add('lifted');
+    g.w.select(g.orig.id);
+    document.body.classList.add(mode === 'move' ? 'dragging' : 'resizing');
+    if (g.type !== 'mouse' && navigator.vibrate) navigator.vibrate(8);
+    updateTip();
+    g.w.tip.hidden = false;
+    g.raf = requestAnimationFrame(autoScroll);
+  }
+
+  function onGestureMove(e) {
+    const g = gesture;
+    if (!g) return;
+    g.lx = e.clientX;
+    g.ly = e.clientY;
+    const dist = Math.hypot(e.clientX - g.sx, e.clientY - g.sy);
+    if (!g.active) {
+      if (dist > (g.type === 'mouse' ? 4 : 8)) {
+        g.moved = true;
+        if (g.type === 'mouse') begin('move');
+        else { cleanupGesture(); return; } // 터치로 그냥 민 것은 스크롤
+      } else return;
+    }
+    e.preventDefault();
+    computeGesture();
+  }
+
+  function snap(v, step) { return Math.round(v / step) * step; }
+
+  function computeGesture() {
+    const g = gesture;
+    const o = g.orig;
+    const dyMin = (g.ly - g.sy + g.w.scroll.scrollTop - g.scroll0) / PPM;
+    const dx = (g.lx - g.sx) / g.w.stacks.clientWidth;
+    const end = o.start + o.minutes;
+    const c = { ...o };
+    switch (g.mode) {
+      case 'move':
+        c.start = clamp(snap(o.start + dyMin, SNAP_MIN), 0, DAY_MIN - SNAP_MIN);
+        c.x = clamp(snap(o.x + dx, SNAP_X), 0, 1 - o.w);
+        break;
+      case 't':
+        c.start = clamp(snap(o.start + dyMin, SNAP_MIN), 0, end - SNAP_MIN);
+        c.minutes = end - c.start;
+        break;
+      case 'b':
+        c.minutes = clamp(snap(o.minutes + dyMin, SNAP_MIN), SNAP_MIN, 2 * DAY_MIN - o.start);
+        break;
+      case 'l':
+        c.x = clamp(snap(o.x + dx, SNAP_X), 0, o.x + o.w - MIN_W);
+        c.w = o.x + o.w - c.x;
+        break;
+      case 'r':
+        c.w = clamp(snap(o.w + dx, SNAP_X), MIN_W, 1 - o.x);
+        break;
+    }
+    c.x = +c.x.toFixed(4);
+    c.w = +c.w.toFixed(4);
+    g.cur = c;
+    placeStack(g.node, c);
+    updateTip();
+  }
+
+  function updateTip() {
+    const c = gesture.cur;
+    gesture.w.tip.textContent = gesture.mode === 'l' || gesture.mode === 'r'
+      ? `폭 ${Math.round(c.w * 100)}%`
+      : `${fmtTime(c.start)} – ${fmtTime(c.start + c.minutes)} · ${fmtDur(c.minutes)}`;
+  }
+
+  // 위·아래 가장자리 근처에서는 저절로 스크롤
+  function autoScroll() {
+    const g = gesture;
+    if (!g || !g.active) return;
+    if (g.mode !== 'l' && g.mode !== 'r') {
+      const sc = g.w.scroll;
+      const r = sc.getBoundingClientRect();
+      const edge = 48;
+      let v = 0;
+      if (g.ly < r.top + edge) v = -Math.ceil((r.top + edge - g.ly) / 4);
+      else if (g.ly > r.bottom - edge) v = Math.ceil((g.ly - (r.bottom - edge)) / 4);
+      if (v) {
+        const before = sc.scrollTop;
+        sc.scrollTop += v;
+        if (sc.scrollTop !== before) computeGesture();
+      }
+    }
+    g.raf = requestAnimationFrame(autoScroll);
+  }
+
+  function cleanupGesture() {
+    const g = gesture;
+    if (!g) return;
+    clearTimeout(g.timer);
+    cancelAnimationFrame(g.raf);
+    g.node.classList.remove('live', 'lifted');
+    document.body.classList.remove('dragging', 'resizing');
+    g.w.tip.hidden = true;
+    removeEventListener('pointermove', onGestureMove);
+    removeEventListener('pointerup', onGestureEnd);
+    removeEventListener('pointercancel', onGestureCancel);
+    gesture = null;
+  }
+
+  function onGestureEnd() {
+    const g = gesture;
+    if (!g) return;
+    if (g.active) {
+      const c = g.cur;
+      const o = g.orig;
+      cleanupGesture();
+      if (c.start !== o.start || c.minutes !== o.minutes || c.x !== o.x || c.w !== o.w) {
+        Store.updateDay(g.w.key, day => {
+          const s = day.stacks.find(x => x.id === c.id);
+          if (s) Object.assign(s, { start: c.start, minutes: c.minutes, x: c.x, w: c.w });
+        });
+      }
+      return;
+    }
+    const id = g.orig.id;
+    const moved = g.moved;
+    cleanupGesture();
+    if (!moved) openSheet(g.w, { id }); // 짧게 누르면 편집
+  }
+
+  function onGestureCancel() {
+    const g = gesture;
+    if (!g) return;
+    if (g.active) placeStack(g.node, g.orig);
+    cleanupGesture();
+  }
+
+  // ───────── 휠 피커 ─────────
+  const ITEM_H = 36;
+
+  function makeWheel(root, values, fmt, onChange) {
+    root.tabIndex = 0;
+    root.append(el('div', 'wheel-pad'));
+    const items = values.map((v, i) => {
+      const it = el('div', 'wheel-item', fmt(v));
+      it.dataset.i = i;
+      root.append(it);
+      return it;
+    });
+    root.append(el('div', 'wheel-pad'));
+    root.style.perspective = '500px';
+    let index = 0;
+    let painting = false;
+    let suppressClick = false;
+
+    function paint() {
+      painting = false;
+      const st = root.scrollTop;
+      items.forEach((it, i) => {
+        const d = clamp((i * ITEM_H - st) / ITEM_H, -3, 3);
+        it.style.transform = `rotateX(${-d * 22}deg) scale(${1 - Math.abs(d) * 0.05})`;
+        it.classList.toggle('on', Math.abs(d) < 0.5);
+      });
+    }
+    root.addEventListener('scroll', () => {
+      if (!painting) { painting = true; requestAnimationFrame(paint); }
+      const i = clamp(Math.round(root.scrollTop / ITEM_H), 0, values.length - 1);
+      if (i !== index) { index = i; onChange(); }
+    }, { passive: true });
+
+    function setIndex(i, smooth) {
+      index = clamp(i, 0, values.length - 1);
+      root.scrollTo({ top: index * ITEM_H, behavior: smooth ? 'smooth' : 'instant' });
+      paint();
+    }
+
+    // 마우스로 위아래로 끌기
+    root.addEventListener('pointerdown', e => {
+      if (e.pointerType !== 'mouse' || e.button !== 0) return;
+      e.preventDefault();
+      root.focus({ preventScroll: true });
+      const sy = e.clientY, st = root.scrollTop;
+      let moved = false;
+      suppressClick = false;
+      root.classList.add('grabbing');
+      const move = ev => {
+        if (Math.abs(ev.clientY - sy) > 3) moved = true;
+        root.scrollTop = st - (ev.clientY - sy);
+      };
+      const up = () => {
+        removeEventListener('pointermove', move);
+        removeEventListener('pointerup', up);
+        root.classList.remove('grabbing');
+        // 끄는 동안 항목이 손가락을 따라오므로, 놓을 때 생기는 click은 무시한다
+        suppressClick = moved;
+        if (!moved) return;
+        setIndex(Math.round(root.scrollTop / ITEM_H), true);
+      };
+      addEventListener('pointermove', move);
+      addEventListener('pointerup', up);
+    });
+    // 터치로 항목을 톡 누르면 그 값으로
+    root.addEventListener('click', e => {
+      if (suppressClick) { suppressClick = false; return; }
+      const hit = e.target.closest('.wheel-item');
+      if (hit) setIndex(+hit.dataset.i, true);
+    });
+    root.addEventListener('keydown', e => {
+      if (e.key === 'ArrowUp') { e.preventDefault(); setIndex(index - 1, true); }
+      if (e.key === 'ArrowDown') { e.preventDefault(); setIndex(index + 1, true); }
+    });
+
+    return {
+      get value() { return values[index]; },
+      set(v) {
+        let best = 0;
+        values.forEach((x, i) => { if (Math.abs(x - v) < Math.abs(values[best] - v)) best = i; });
+        setIndex(best, false);
+      },
+    };
+  }
+
+  const range = (n, step = 1) => Array.from({ length: n }, (_, i) => i * step);
+  const wheels = {};
+  const onWheel = () => syncSheet();
+  wheels.sh = makeWheel($('start-h'), range(24), pad, onWheel);
+  wheels.sm = makeWheel($('start-m'), range(12, 5), pad, onWheel);
+  wheels.dh = makeWheel($('dur-h'), range(24), String, onWheel);
+  wheels.dm = makeWheel($('dur-m'), range(12, 5), String, onWheel);
+
+  // ───────── 스택 입력 시트 ─────────
+  const sheet = $('sheet');
+  const backdrop = $('sheet-backdrop');
+  const nameInput = $('stack-name');
+  const colorsEl = $('colors');
+  const deleteBtn = $('delete-stack');
+
+  let sheetWin = null;  // 시트가 고치는 창
+  let editingId = null;
+  let draftColor = COLORS[0];
+  let draftTaskId = null;
+  let deleteArmed = false;
+
+  COLORS.forEach(c => {
+    const b = el('button', 'swatch');
+    b.type = 'button';
+    b.dataset.color = c;
+    b.style.setProperty('--c', c);
+    b.setAttribute('role', 'radio');
+    b.setAttribute('aria-label', `색상 ${c}`);
+    colorsEl.append(b);
+  });
+
+  const draftStart = () => wheels.sh.value * 60 + wheels.sm.value;
+  const draftMinutes = () => wheels.dh.value * 60 + wheels.dm.value;
+
+  function syncSheet() {
+    colorsEl.querySelectorAll('.swatch').forEach(b => b.setAttribute('aria-checked', String(b.dataset.color === draftColor)));
+    const m = draftMinutes();
+    $('sheet-range').textContent = m
+      ? `${fmtTime(draftStart())} – ${fmtTime(draftStart() + m)} · ${fmtDur(m)}`
+      : '걸리는 시간을 정한다';
+    $('sheet-save').disabled = !nameInput.value.trim() || !m;
+  }
+
+  // opts: { id }는 편집, 아니면 새 스택. 새 스택은 start·name·minutes·color·taskId를 미리 채울 수 있다
+  function openSheet(w, opts) {
+    if (!w || !sheet.hidden) return;
+    const day = Store.getDay(w.key);
+    sheetWin = w;
+    editingId = opts.id || null;
+    draftTaskId = null;
+    deleteArmed = false;
+    deleteBtn.textContent = '스택 삭제';
+    let st, mins;
+
+    if (editingId) {
+      const s = day.stacks.find(x => x.id === editingId);
+      if (!s) return;
+      nameInput.value = s.name;
+      st = s.start;
+      mins = s.minutes;
+      draftColor = s.color;
+      $('sheet-title').textContent = '스택 편집';
+      $('sheet-save').textContent = '완료';
+    } else {
+      nameInput.value = opts.name || '';
+      mins = opts.minutes || 60;
+      draftTaskId = opts.taskId || null;
+      if (opts.start != null) st = opts.start;
+      else if (day.stacks.length) st = Math.min(DAY_MIN - 15, Math.max(...day.stacks.map(s => s.start + s.minutes)));
+      else if (w.key === keyOf(new Date())) {
+        const n = new Date();
+        st = Math.min(DAY_MIN - 15, Math.ceil((n.getHours() * 60 + n.getMinutes()) / 15) * 15);
+      } else st = Store.DEFAULT_START;
+      // 직전 스택과 다른 색을 기본으로
+      const last = day.stacks[day.stacks.length - 1];
+      draftColor = opts.color || (last ? COLORS[(COLORS.indexOf(last.color) + 1) % COLORS.length] : COLORS[0]);
+      $('sheet-title').textContent = opts.taskId ? '할 일을 시간표에' : '새 스택';
+      $('sheet-save').textContent = '추가';
+    }
+    $('edit-actions').hidden = !editingId;
+
+    backdrop.hidden = false;
+    sheet.hidden = false;
+    // 화면에 보인 뒤에 휠 위치를 맞춰야 스크롤 값이 먹는다
+    wheels.sh.set(Math.floor(st / 60) % 24);
+    wheels.sm.set(st % 60);
+    wheels.dh.set(Math.floor(mins / 60));
+    wheels.dm.set(mins % 60);
+    syncSheet();
+
+    const centered = matchMedia('(min-width: 640px)').matches;
+    backdrop.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 250, easing: 'ease-out' });
+    sheet.animate(
+      centered
+        ? [{ transform: 'translateY(-50%) scale(0.9)', opacity: 0 }, { transform: 'translateY(-50%)', opacity: 1 }]
+        : [{ transform: 'translateY(100%)' }, { transform: 'none' }],
+      motion(centered ? SPRING_BOUNCY : SPRING_SMOOTH)
+    );
+    if (!editingId && !opts.name) setTimeout(() => nameInput.focus({ preventScroll: true }), centered ? 0 : 80);
+  }
+
+  function hideSheetNow() {
+    sheet.hidden = true;
+    backdrop.hidden = true;
+    sheet.style.transform = '';
+    sheet.getAnimations().forEach(x => x.cancel());
+    backdrop.getAnimations().forEach(x => x.cancel());
+  }
+
+  function closeSheet(immediate) {
+    if (sheet.hidden) return;
+    nameInput.blur();
+    if (immediate) { hideSheetNow(); return; }
+    const centered = matchMedia('(min-width: 640px)').matches;
+    backdrop.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 220, easing: 'ease-in', fill: 'forwards' });
+    sheet.animate(
+      centered
+        ? [{ transform: 'translateY(-50%)', opacity: 1 }, { transform: 'translateY(-50%) scale(0.94)', opacity: 0 }]
+        : [{ transform: 'none' }, { transform: 'translateY(100%)' }],
+      { duration: centered ? 180 : 280, easing: 'cubic-bezier(0.32, 0.72, 0, 1)', fill: 'forwards' }
+    ).finished.then(hideSheetNow);
+  }
+
+  nameInput.addEventListener('input', syncSheet);
+  colorsEl.addEventListener('click', e => {
+    const b = e.target.closest('.swatch');
+    if (!b) return;
+    draftColor = b.dataset.color;
+    syncSheet();
+  });
+
+  sheet.addEventListener('submit', e => {
+    e.preventDefault();
+    const w = sheetWin;
+    const name = nameInput.value.trim();
+    const minutes = draftMinutes();
+    if (!name || !minutes || !w || w.mode === 'closed') return;
+    const start = draftStart();
+    let id = editingId;
+    Store.updateDay(w.key, day => {
+      if (id) {
+        const s = day.stacks.find(x => x.id === id);
+        if (s) Object.assign(s, { name, start, minutes, color: draftColor });
+      } else {
+        id = Store.newId();
+        w.pendingHighlight = id;
+        const s = { id, name, start, minutes, color: draftColor, x: 0, w: 1 };
+        if (draftTaskId) s.taskId = draftTaskId;
+        day.stacks.push(s);
+      }
+    });
+    closeSheet();
+    requestAnimationFrame(() => w.scrollToStack(id));
+  });
+
+  deleteBtn.addEventListener('click', () => {
+    if (!deleteArmed) {
+      deleteArmed = true;
+      deleteBtn.textContent = '한 번 더 누르면 삭제';
+      return;
+    }
+    const w = sheetWin;
+    const id = editingId;
+    const node = w.stacks.querySelector(`.stack[data-id="${id}"]`);
+    closeSheet();
+    if (w.selectedId === id) w.selectedId = null;
+    const done = () => Store.updateDay(w.key, day => { day.stacks = day.stacks.filter(x => x.id !== id); });
+    if (node) {
+      node.animate([{ transform: 'none', opacity: 1 }, { transform: 'scale(0.85)', opacity: 0 }], { duration: 220, easing: 'ease-in', fill: 'forwards' })
+        .finished.then(done);
+    } else {
+      done();
+    }
+  });
+
+  $('sheet-cancel').addEventListener('click', () => closeSheet());
+  backdrop.addEventListener('click', () => closeSheet());
+
+  // 폰에서 시트 위쪽을 아래로 끌어서 닫기
+  let sheetDrag = null;
+  sheet.addEventListener('touchstart', e => {
+    if (matchMedia('(min-width: 640px)').matches) return;
+    if (sheet.scrollTop > 0 || e.target.closest('input, .wheel, .colors, button')) return;
+    sheetDrag = { y: e.touches[0].clientY, dy: 0 };
+  }, { passive: true });
+  sheet.addEventListener('touchmove', e => {
+    if (!sheetDrag) return;
+    sheetDrag.dy = Math.max(0, e.touches[0].clientY - sheetDrag.y);
+    sheet.getAnimations().forEach(a => a.cancel());
+    sheet.style.transform = `translateY(${sheetDrag.dy}px)`;
+  }, { passive: true });
+  sheet.addEventListener('touchend', () => {
+    if (!sheetDrag) return;
+    const { dy } = sheetDrag;
+    sheetDrag = null;
+    sheet.style.transform = '';
+    if (dy > 110) {
+      sheet.animate([{ transform: `translateY(${dy}px)` }, { transform: 'translateY(100%)' }], { duration: 220, easing: 'ease-out', fill: 'forwards' });
+      backdrop.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 220, fill: 'forwards' }).finished.then(hideSheetNow);
+    } else if (dy > 0) {
+      sheet.animate([{ transform: `translateY(${dy}px)` }, { transform: 'none' }], motion(SPRING_BOUNCY));
+    }
+  });
+
+  // ───────── 키보드 ─────────
+  // 창 관련 키는 맨 앞 창에 적용한다
+  document.addEventListener('keydown', e => {
+    const w = activeWin();
+    if (e.key === 'Escape') {
+      if (!sheet.hidden) closeSheet();
+      else if (w && w.selectedId) w.select(null);
+      else if (w) w.close();
+      return;
+    }
+    if (e.target.closest('input, .wheel, .splitter')) return;
+    if (!sheet.hidden) return;
+    if (e.key === 't' || e.key === 'T') { goToday(); return; }
+    if (w) {
+      if (e.key === 'ArrowLeft') w.goDay(-1);
+      if (e.key === 'ArrowRight') w.goDay(1);
+      if (e.key === 'n' || e.key === '+') { e.preventDefault(); openSheet(w, {}); }
+      if ((e.key === 'Delete' || e.key === 'Backspace') && w.selectedId) openSheet(w, { id: w.selectedId });
+    } else if (!e.target.closest('.cell')) {
+      if (e.key === 'ArrowLeft') shiftMonth(-1);
+      if (e.key === 'ArrowRight') shiftMonth(1);
+    }
+  });
+
+  // 데이터가 바뀌면 화면 갱신
+  const renderWins = () => wins.forEach(w => w.render());
+  Store.subscribe(() => {
+    renderMonth();
+    renderWins();
+  });
+  [Google, Microsoft].forEach(p => p.subscribe(() => {
+    renderAccounts();
+    if (!Sources.all().length) renderTasks();
+  }));
+  Sources.subscribe(() => {
+    renderMonth();
+    renderTasks();
+    renderWins();
+  });
+
+  // 자정이 지나거나 시간이 흐르면 표시를 다시 그린다
+  let lastToday = keyOf(new Date());
+  setInterval(() => {
+    const k = keyOf(new Date());
+    if (k !== lastToday) { lastToday = k; renderMonth(); renderWins(); }
+    renderTasks();
+  }, 60 * 1000);
+
+  tickClock();
+  renderWeather();
+  renderMonth();
+  renderTasks();
+  renderAccounts();
+})();
