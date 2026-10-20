@@ -28,6 +28,19 @@
   const MIN_W = 1 / 6;     // 스택 최소 폭
   const MAX_WINS = 6;      // 동시에 띄우는 시간표 창 수
   const DROP_MIN = 60;     // 할 일을 끌어 놓을 때 기본 길이(분)
+  const periodsOf = key => (School.isSchoolDay(key) ? School.PERIODS : []);
+  const periodLabel = id => (School.PERIODS.find(p => p.id === id) || {}).label || '';
+
+  // 그날 스택들 사이에 cand를 놓아 본다(겹침 방지, 끼워 넣기, 교시). 저장은 하지 않는다
+  function tryPlace(key, cand) {
+    return Placement.place(Store.getDay(key).stacks, cand, { periods: periodsOf(key), newId: Store.newId });
+  }
+  // 놓아 본 결과를 저장한다. 새로 생긴 조각은 튀어나오게
+  function commitPlace(w, res) {
+    const before = new Set(Store.getDay(w.key).stacks.map(s => s.id));
+    w.pendingHighlight = res.stacks.filter(s => !before.has(s.id)).map(s => s.id);
+    Store.updateDay(w.key, day => { day.stacks = res.stacks; });
+  }
 
   function fmtTime(min) {
     const next = min >= DAY_MIN;
@@ -141,45 +154,66 @@
     drawTempGraph();
   }
 
-  // 시간별 기온을 꺾은선 하나로 그린다. 기온 숫자는 지금·최고·최저에만 붙이고, 나머지는 올리면 보인다
+  // 시간별 기온 그래프. 가로축은 시각, 세로축은 기온(°C).
+  // 화면을 켤 때마다(처음 열 때, 다른 앱에서 돌아올 때) 선이 왼쪽부터 새로 그려진다
   const SVG_NS = 'http://www.w3.org/2000/svg';
   const svgEl = (tag, attrs) => {
     const e = document.createElementNS(SVG_NS, tag);
     Object.entries(attrs || {}).forEach(([k, v]) => e.setAttribute(k, v));
     return e;
   };
-  function drawTempGraph() {
+  let graphDrawnOnce = false;
+  function drawTempGraph(animate) {
     const box = $('wx-hourly');
     const w = Weather.get();
     const hours = w.status === 'ok' ? w.hourly : [];
     const W = box.clientWidth, H = box.clientHeight;
     if (!hours.length || !W || !H) { box.replaceChildren(); return; }
+    if (!graphDrawnOnce) { graphDrawnOnce = true; animate = true; }
 
-    const padX = 14, top = 14, bottom = 14;
+    const left = 30, right = 8, top = 6, bottom = 16;
     const temps = hours.map(h => h.temp);
-    const lo = Math.min(...temps), hi = Math.max(...temps);
-    const span = Math.max(hi - lo, 4); // 거의 평평한 날에 작은 차이가 과장되지 않게
-    const mid = (hi + lo) / 2;
-    const step = (W - padX * 2) / (hours.length - 1);
-    const xOf = i => padX + i * step;
-    const yOf = t => top + (H - top - bottom) * (0.5 - (t - mid) / span);
+    // 눈금: 최저·최고를 정수로 감싸고, 차이가 너무 작으면 위아래로 벌린다
+    let lo = Math.floor(Math.min(...temps)), hi = Math.ceil(Math.max(...temps));
+    if (hi - lo < 4) { const m = (hi + lo) / 2; lo = Math.floor(m - 2); hi = Math.ceil(m + 2); }
+    const mid = Math.round((hi + lo) / 2);
+    const step = (W - left - right) / (hours.length - 1);
+    const xOf = i => left + i * step;
+    const yOf = v => top + (H - top - bottom) * (hi - v) / (hi - lo);
     const pts = hours.map((h, i) => [xOf(i), yOf(h.temp)]);
+    const baseY = H - bottom;
 
-    const svg = svgEl('svg', { width: W, height: H, viewBox: `0 0 ${W} ${H}`, class: 'wx-graph' });
+    const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, class: 'wx-graph' });
     const defs = svgEl('defs');
     const grad = svgEl('linearGradient', { id: 'wx-fill', x1: 0, y1: 0, x2: 0, y2: 1 });
     grad.append(svgEl('stop', { offset: '0', class: 'wx-fill-top' }), svgEl('stop', { offset: '1', class: 'wx-fill-bottom' }));
     defs.append(grad);
-    const line = pts.map((p, i) => `${i ? 'L' : 'M'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join('');
-    const baseY = H - bottom;
-    svg.append(
-      defs,
-      svgEl('path', { d: `${line}L${pts[pts.length - 1][0]},${baseY}L${pts[0][0]},${baseY}Z`, fill: 'url(#wx-fill)' }),
-      svgEl('path', { d: line, class: 'wx-line' }),
-    );
+    svg.append(defs);
 
-    const iMax = temps.indexOf(hi), iMin = temps.indexOf(lo);
-    const every = step < 30 ? 3 : 2;
+    // 세로축(기온) 눈금과 가로 보조선
+    [hi, mid, lo].forEach(v => {
+      const y = yOf(v);
+      svg.append(svgEl('line', { x1: left, x2: W - right, y1: y, y2: y, class: 'wx-grid' }));
+      const t = svgEl('text', { x: left - 5, y: y + 3, class: 'wx-ytick' });
+      t.textContent = `${v}°`;
+      svg.append(t);
+    });
+    // 가로축(시각)
+    svg.append(svgEl('line', { x1: left, x2: W - right, y1: baseY, y2: baseY, class: 'wx-axis' }));
+    const every = step < 22 ? 3 : 2;
+    hours.forEach((h, i) => {
+      if (i % every) return;
+      const t = svgEl('text', { x: xOf(i), y: H - 3, class: `wx-xtick${i === 0 ? ' now' : ''}` });
+      t.textContent = i === 0 ? '지금' : `${h.hour}시`;
+      svg.append(t);
+    });
+
+    const line = pts.map((p, i) => `${i ? 'L' : 'M'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join('');
+    const area = svgEl('path', { d: `${line}L${pts[pts.length - 1][0]},${baseY}L${pts[0][0]},${baseY}Z`, class: 'wx-area' });
+    const path = svgEl('path', { d: line, class: 'wx-line' });
+    svg.append(area, path);
+
+    // 시각마다 올리면 값이 보이는 점
     hours.forEach((h, i) => {
       const [x, y] = pts[i];
       const g = svgEl('g', { class: `wx-pt${i === 0 ? ' now' : ''}` });
@@ -187,21 +221,30 @@
       const title = svgEl('title');
       title.textContent = `${i === 0 ? '지금' : `${h.hour}시`} ${h.temp}° · ${d.text}${h.pop != null ? ` · 강수 ${h.pop}%` : ''}`;
       g.append(title, svgEl('rect', { x: x - step / 2, y: 0, width: step, height: H, class: 'wx-hit' }));
+      g.append(svgEl('line', { x1: x, x2: x, y1: top, y2: baseY, class: 'wx-guide' }));
       g.append(svgEl('circle', { cx: x, cy: y, r: i === 0 ? 3.5 : 3, class: 'wx-dot' }));
-      const labelled = i === 0 || i === iMax || i === iMin;
-      const tv = svgEl('text', { x, y: y - 6, class: `wx-val${labelled ? ' on' : ''}` });
+      const tv = svgEl('text', { x: Math.min(Math.max(x, left + 10), W - right - 10), y: Math.max(y - 6, 9), class: 'wx-val' });
       tv.textContent = `${h.temp}°`;
       g.append(tv);
-      if (i % every === 0) {
-        const th = svgEl('text', { x, y: H - 2, class: 'wx-hr' });
-        th.textContent = i === 0 ? '지금' : `${h.hour}시`;
-        g.append(th);
-      }
       svg.append(g);
     });
     box.replaceChildren(svg);
+
+    if (animate && !REDUCED.matches) {
+      const len = path.getTotalLength();
+      path.style.strokeDasharray = `${len}`;
+      const draw = path.animate([{ strokeDashoffset: len }, { strokeDashoffset: 0 }], { duration: 1100, easing: 'cubic-bezier(0.33, 0, 0.15, 1)', fill: 'backwards' });
+      draw.onfinish = () => { path.style.strokeDasharray = ''; };
+      area.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 600, delay: 450, easing: 'ease-out', fill: 'backwards' });
+      svg.querySelector('.wx-pt.now .wx-dot')?.animate([{ transform: 'scale(0)' }, { transform: 'scale(1)' }], { ...SPRING_BOUNCY, fill: 'backwards' });
+      svg.querySelectorAll('.wx-ytick, .wx-xtick').forEach((t, i) => t.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 300, delay: 60 * i, fill: 'backwards' }));
+    }
   }
-  addEventListener('resize', () => requestAnimationFrame(drawTempGraph));
+  // 다른 앱이나 탭에 있다가 돌아오면 다시 그린다
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') drawTempGraph(true);
+  });
+  addEventListener('resize', () => requestAnimationFrame(() => drawTempGraph(false)));
 
   // 폰에서는 시간별 예보를 접어 두고, 현재 날씨를 누르면 편다. 넓은 화면에서는 누르면 새로 받는다
   $('wx-now').addEventListener('click', e => {
@@ -212,7 +255,7 @@
     const from = open ? 0 : hourly.getBoundingClientRect().height;
     hourly.getAnimations().forEach(a => a.cancel());
     hourly.classList.add('show');
-    if (open) drawTempGraph();
+    if (open) drawTempGraph(true);
     const a = animateHeight(hourly, from, open ? hourly.offsetHeight : 0, open ? SPRING_SMOOTH : EASE_OUT);
     a.onfinish = () => {
       hourly.style.overflow = '';
@@ -305,15 +348,23 @@
       if (d.getDay() === 6) cell.classList.add('sat');
       if (key === todayKey) cell.classList.add('today');
       if (openKeys.has(key)) cell.classList.add('open');
+      const holiday = School.holidayName(key);
+      if (holiday) cell.classList.add('holiday');
 
-      const stacks = Store.getDay(key).stacks.sort((a, b) => a.start - b.start);
+      // 나뉜 스택은 칸에 한 번만
+      const seenGroup = new Set();
+      const stacks = Store.getDay(key).stacks.sort((a, b) => a.start - b.start)
+        .filter(s => !s.group || (!seenGroup.has(s.group) && seenGroup.add(s.group)));
       const dues = deadlinesOn(key);
-      let label = `${d.getMonth() + 1}월 ${d.getDate()}일`;
+      let label = `${d.getMonth() + 1}월 ${d.getDate()}일${holiday ? ` ${holiday}` : ''}`;
       if (stacks.length) label += `, 스택 ${stacks.length}개`;
       if (dues.length) label += `, 마감 ${dues.length}개`;
       cell.setAttribute('aria-label', label);
 
-      cell.append(el('span', 'num', d.getDate()));
+      const head = el('div', 'cell-head');
+      head.append(el('span', 'num', d.getDate()));
+      if (holiday) head.append(el('span', 'hol', holiday.split(' · ')[0]));
+      cell.append(head);
 
       if (stacks.length || dues.length) {
         const list = el('div', 'chips-mini');
@@ -588,6 +639,7 @@
 
   // 할 일 묶음. 항목은 위에서부터 처음 맞는 묶음에 들어간다
   const SECTIONS = [
+    { id: 'week', title: '이번주에 할 일', sub: '', match: () => false, week: true },
     { id: 'school', title: '학교', sub: 'Classroom · Teams', match: it => it.account === 'school' },
     { id: 'outside', title: '학교 외', sub: 'Classroom', match: it => it.source === 'classroom' },
     { id: 'mine', title: 'Tasks', sub: '내 할 일 목록', match: it => it.source === 'tasks', canAdd: true },
@@ -605,26 +657,112 @@
   }
   const dueMs = it => { const t = dueTime(it); return t ? t.getTime() : Infinity; };
 
-  // 묶음 id → 기한 순으로 정렬한 항목
-  function groupItems(all) {
+  // ───────── 이번주에 할 일 ─────────
+  // 기한이 이번 주(월~일)인 항목. 체크한 것은 원래 목록에서 사라져도(Tasks 완료 등) 그 주 동안 기억해 둔다.
+  // 체크하고 월~금 시간표에도 올린 것이 '끝난 할 일'이다. 모두 끝나면 묶음이 아주 작게 줄어든다.
+  const WEEK_KEY = 'timetable.week';
+  const weekStart = (d = new Date()) => addDays(new Date(d.getFullYear(), d.getMonth(), d.getDate()), -((d.getDay() + 6) % 7));
+  let weekMem = (() => { try { return JSON.parse(localStorage.getItem(WEEK_KEY)) || {}; } catch (e) { return {}; } })();
+  const demoChecked = {};
+  const weekInfo = new Map(); // id → { done, scheduled, live }
+
+  function saveWeek() {
+    try { localStorage.setItem(WEEK_KEY, JSON.stringify(weekMem)); } catch (e) { /* 무시 */ }
+  }
+  // 체크 기록. 주가 바뀌면 비우고, 지난주에 체크한 이 기기 할 일은 그때 지운다
+  function weekChecks() {
+    if (Sources.isDemo()) return demoChecked;
+    const k = keyOf(weekStart());
+    if (weekMem.week !== k) {
+      const old = Object.keys(weekMem.checked || {}).filter(id => id.startsWith('local:'));
+      weekMem = { week: k, checked: {} };
+      saveWeek();
+      if (old.length) setTimeout(() => old.forEach(id => Sources.removeItem(id)), 0);
+    }
+    return weekMem.checked;
+  }
+
+  function scheduledTaskIds() {
+    const mon = weekStart();
+    const ids = new Set();
+    for (let i = 0; i < 5; i++) Store.getDay(keyOf(addDays(mon, i))).stacks.forEach(s => { if (s.taskId) ids.add(s.taskId); });
+    return ids;
+  }
+
+  function weekItems(all) {
+    const checked = weekChecks();
+    const mon = weekStart(), end = addDays(mon, 7);
+    const sched = scheduledTaskIds();
+    const live = all.filter(it => { const t = dueTime(it); return t && t >= mon && t < end; });
+    const liveIds = new Set(live.map(it => it.id));
+    const list = [...live, ...Object.values(checked).filter(snap => !liveIds.has(snap.id))];
+    weekInfo.clear();
+    list.forEach(it => weekInfo.set(it.id, { done: !!checked[it.id] || !!it.done, scheduled: sched.has(it.id), live: liveIds.has(it.id) }));
+    return list.sort((a, b) => (weekInfo.get(a.id).done - weekInfo.get(b.id).done) || dueMs(a) - dueMs(b));
+  }
+
+  async function toggleWeekCheck(it) {
+    const checked = weekChecks();
+    const info = weekInfo.get(it.id) || {};
+    if (info.done) {
+      if (!checked[it.id]) { toast('제출한 과제라 체크를 풀 수 없다'); return; }
+      if (!info.live) { toast('Tasks에서 완료 처리해서 여기서는 되돌릴 수 없다'); return; }
+      delete checked[it.id];
+      saveWeek();
+      renderTasks();
+      return;
+    }
+    const { id, source, account, title, course, due, hasTime, link } = it;
+    checked[id] = { id, source, account, title, course, due, hasTime, link, done: true };
+    saveWeek();
+    renderTasks();
+    // 구글 Tasks 항목은 실제로 완료 처리한다. 클래스룸·Teams는 제출을 대신할 수 없어 여기에만 표시한다
+    if (source === 'tasks' && it.ref && !Sources.isDemo()) {
+      try {
+        await Google.completeTask(it);
+      } catch (err) {
+        delete checked[id];
+        saveWeek();
+        renderTasks();
+        toast(err.message);
+      }
+    }
+  }
+
+  // 묶음 id → 기한 순으로 정렬한 항목. 이번 주 항목은 '이번주에 할 일'에만 나온다
+  function buildGroups() {
+    const all = Sources.all();
+    const week = weekItems(all);
+    const inWeek = new Set(week.map(it => it.id));
     const out = new Map(SECTIONS.map(def => [def.id, []]));
-    [...all].sort((a, b) => dueMs(a) - dueMs(b)).forEach(it => {
+    out.set('week', week);
+    all.filter(it => !it.done && !inWeek.has(it.id)).sort((a, b) => dueMs(a) - dueMs(b)).forEach(it => {
       const def = SECTIONS.find(d => d.match(it));
       if (def) out.get(def.id).push(it);
     });
     return out;
   }
 
-  function taskRow(it, now) {
+  function taskRow(it, now, def) {
     const t = dueTime(it);
     const src = SOURCE_INFO[it.source];
     const row = el('div', 'task');
     row.dataset.id = it.id;
     row.style.setProperty('--c', src.color);
-    if (t && t < now) row.classList.add('overdue');
+    const wk = def && def.week ? weekInfo.get(it.id) : null;
+    if (wk && wk.done) row.classList.add('done');
+    else if (t && t < now) row.classList.add('overdue');
     else if (t && t - now < 24 * 3600 * 1000) row.classList.add('soon');
 
-    if (it.source === 'tasks' && (it.ref || it.account === 'local')) {
+    if (wk) {
+      // 이번 주 항목은 출처와 상관없이 체크할 수 있다
+      const check = el('button', `task-check${wk.done ? ' on' : ''}`);
+      check.type = 'button';
+      check.setAttribute('aria-label', `${it.title} ${wk.done ? '완료 취소' : '완료'}`);
+      check.setAttribute('aria-pressed', String(wk.done));
+      check.addEventListener('click', ev => { ev.stopPropagation(); toggleWeekCheck(it); });
+      row.append(check);
+    } else if (it.source === 'tasks' && (it.ref || it.account === 'local')) {
       // 구글 Tasks 항목과 이 기기 할 일은 여기서 완료 처리할 수 있다
       const check = el('button', 'task-check');
       check.type = 'button';
@@ -653,6 +791,14 @@
     if (it.account === 'local') meta.push('이 기기');
     if (meta.length) main.append(el('div', 'task-meta', meta.join(' · ')));
     row.append(main);
+
+    if (wk) {
+      // 월~금 시간표에 올렸는지
+      const sch = el('span', `sched${wk.scheduled ? ' on' : ''}`);
+      sch.title = wk.scheduled ? '이번 주 시간표에 올라가 있다' : '아직 시간표에 올리지 않았다. 끌어서 월~금 시간표에 놓는다';
+      sch.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="15" rx="3"/><path d="M4 10h16M9 3v4M15 3v4"/></svg>';
+      row.append(sch);
+    }
 
     const due = el('div', 'task-due');
     if (t) {
@@ -734,7 +880,7 @@
     body.replaceChildren();
     if (def.canAdd) body.append(addForm.f);
     if (!items.length) {
-      body.append(el('p', 'sec-empty', def.canAdd ? '할 일이 없다. + 버튼으로 추가한다' : '남은 과제가 없다'));
+      body.append(el('p', 'sec-empty', def.week ? '이번 주가 기한인 할 일이 없다' : def.canAdd ? '할 일이 없다. + 버튼으로 추가한다' : '남은 과제가 없다'));
       return;
     }
     if (collapsed.has(def.id)) {
@@ -742,14 +888,14 @@
       const pile = el('div', 'pile');
       pile.dataset.n = Math.min(items.length, 3);
       for (let i = Math.min(items.length, 3) - 1; i >= 1; i--) pile.append(el('div', `pile-layer l${i}`));
-      const front = taskRow(items[0], now);
+      const front = taskRow(items[0], now, def);
       front.classList.add('front');
       pile.append(front);
       if (items.length > 1) pile.append(el('span', 'pile-more', `+${items.length - 1}`));
       body.append(pile);
     } else {
       const list = el('div', 'sec-list');
-      items.forEach(it => list.append(taskRow(it, now)));
+      items.forEach(it => list.append(taskRow(it, now, def)));
       body.append(list);
     }
   }
@@ -760,8 +906,9 @@
     const all = Sources.all().filter(it => !it.done);
     const now = new Date();
     const frag = document.createDocumentFragment();
+    const groups = buildGroups();
     itemsById.clear();
-    all.forEach(it => itemsById.set(it.id, it));
+    groups.forEach(items => items.forEach(it => itemsById.set(it.id, it)));
 
     if (Sources.isDemo()) {
       const note = el('div', 'demo-note');
@@ -786,21 +933,30 @@
       frag.append(empty);
     }
 
-    const groups = groupItems(all);
     SECTIONS.forEach(def => {
       const items = groups.get(def.id);
-      if (!items.length && !def.canAdd) return;
+      if (!items.length && !def.canAdd && !def.week) return;
 
-      const sec = el('section', 'sec');
+      const sec = el('section', `sec${def.week ? ' week' : ''}`);
       sec.dataset.sec = def.id;
+      let sub = def.sub;
+      if (def.week) {
+        const mon = weekStart(), sun = addDays(mon, 6);
+        sub = `${mon.getMonth() + 1}/${mon.getDate()} – ${sun.getMonth() + 1}/${sun.getDate()}`;
+        // 모두 체크하고 월~금 시간표에도 올렸으면 아주 작게
+        const allDone = items.length > 0 && items.every(it => { const w = weekInfo.get(it.id); return w.done && w.scheduled; });
+        sec.classList.toggle('all-done', allDone);
+        if (allDone) sub += ' · 모두 끝냈다';
+      }
       const head = el('div', 'sec-head');
       const toggle = el('button', 'sec-toggle');
       toggle.type = 'button';
       toggle.setAttribute('aria-expanded', String(!collapsed.has(def.id)));
       toggle.innerHTML = '<svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg>';
-      toggle.append(el('span', 'sec-title', def.title), el('span', 'sec-sub', def.sub));
-      const overdue = items.filter(it => { const t = dueTime(it); return t && t < now; }).length;
-      const count = el('span', `sec-count${overdue ? ' alert' : ''}`, items.length);
+      toggle.append(el('span', 'sec-title', def.title), el('span', 'sec-sub', sub));
+      const pending = def.week ? items.filter(it => !weekInfo.get(it.id).done) : items;
+      const overdue = pending.filter(it => { const t = dueTime(it); return t && t < now; }).length;
+      const count = el('span', `sec-count${overdue ? ' alert' : ''}`, def.week ? `${items.length - pending.length}/${items.length}` : items.length);
       if (overdue) count.title = `지난 마감 ${overdue}개`;
       toggle.append(count);
       head.append(toggle);
@@ -838,7 +994,7 @@
     const from = body.getBoundingClientRect().height;
     body.getAnimations({ subtree: true }).forEach(a => a.cancel());
     const now = new Date();
-    const sorted = groupItems(Sources.all().filter(it => !it.done)).get(id);
+    const sorted = buildGroups().get(id);
 
     sectionBusy++;
     const done = () => {
@@ -913,6 +1069,16 @@
     openDay(key, cell && cell.offsetParent ? cell : row, it.hasTime ? dueInfo(it).min : null);
   });
 
+  // 놓아 본 결과를 한 줄로
+  function placeHint(res) {
+    const p = res.placed;
+    const range = `${fmtTime(p.start)} – ${fmtTime(p.start + p.minutes)}`;
+    if (res.kind === 'period') return `${periodLabel(p.period)} · ${range}`;
+    if (res.kind === 'split') return `나누어 끼워 넣기 · ${range}`;
+    if (res.kind === 'snap') return `빈자리에 붙이기 · ${range}`;
+    return range;
+  }
+
   // ───────── 할 일을 끌어 시간표에 넣기 ─────────
   // PC는 바로 끌고, 폰은 길게 눌러 집어 든다. 열린 시간표 창에 놓으면 그 시각에,
   // 달력 칸에 놓으면 그 날짜 창을 열고 스택 시트를 띄운다. 길이와 색은 시트에서 정한다.
@@ -980,18 +1146,25 @@
     const w = winEl && winOf.get(winEl);
     if (w && w.mode === 'open' && hit.closest('.win-body')) {
       const r = w.stacks.getBoundingClientRect();
-      const start = clamp(Math.floor((d.y - r.top) / PPM / 15) * 15, 0, DAY_MIN - DROP_MIN);
-      target = { kind: 'win', w, start };
+      const raw = clamp(Math.floor((d.y - r.top) / PPM / 15) * 15, 0, DAY_MIN - DROP_MIN);
+      const res = tryPlace(w.key, { id: '__drop', name: d.it.title, start: raw, minutes: DROP_MIN, x: 0, w: 1 });
+      target = { kind: 'win', w, start: res.ok ? res.placed.start : raw, res };
     } else if (hit && hit.closest('.cell')) {
       target = { kind: 'cell', cell: hit.closest('.cell') };
     }
 
     // 미리보기 표시
-    wins.forEach(x => x.showDropPreview(target && target.kind === 'win' && target.w === x ? target.start : null, SOURCE_INFO[d.it.source].stack));
+    wins.forEach(x => {
+      if (!target || target.kind !== 'win' || target.w !== x) { x.showDropPreview(null); return; }
+      const res = target.res;
+      x.showDropPreview(res.ok ? res.placed : { start: target.start, minutes: DROP_MIN }, SOURCE_INFO[d.it.source].stack, res.ok ? placeHint(res) : res.note, !res.ok);
+    });
     grid.querySelectorAll('.cell.drop-target').forEach(c => { if (!target || target.cell !== c) c.classList.remove('drop-target'); });
     if (target && target.kind === 'cell') target.cell.classList.add('drop-target');
     ghost.querySelector('span').textContent = target
-      ? target.kind === 'win' ? `${fmtTime(target.start)}부터 ${fmtDur(DROP_MIN)}` : `${target.cell.getAttribute('aria-label').split(',')[0]}에 넣기`
+      ? target.kind === 'win'
+        ? (target.res.ok ? `${fmtTime(target.res.placed.start)}부터 ${fmtDur(target.res.placed.minutes)}` : target.res.note)
+        : `${target.cell.getAttribute('aria-label').split(',')[0]}에 넣기`
       : `${fmtDur(DROP_MIN)} · 놓을 곳으로`;
     d.target = target;
 
@@ -1053,7 +1226,10 @@
     // 끌기를 끝낸 뒤 따라오는 click은 무시한다
     suppressRowClick = true;
     setTimeout(() => { suppressRowClick = false; }, 0);
-    if (!target) return;
+    if (!target || (target.kind === 'win' && !target.res.ok)) {
+      if (target) toast(target.res.note);
+      return;
+    }
     const prefill = { name: it.title, minutes: DROP_MIN, color: SOURCE_INFO[it.source].stack, taskId: it.id };
     if (target.kind === 'win') {
       target.w.focus();
@@ -1150,6 +1326,8 @@
       this.titleEl = q('.win-date');
       this.summaryEl = q('.win-summary');
       this.todayBtn = q('[data-act="today"]');
+      this.schoolEl = q('.school');
+      this.schoolBtn = q('[data-act="school"]');
       winOf.set(root, this);
 
       // 새 창은 앞 창에서 조금씩 비켜 연다
@@ -1173,6 +1351,11 @@
         if (act === 'prev') this.goDay(-1);
         else if (act === 'next') this.goDay(1);
         else if (act === 'today') this.setKey(keyOf(new Date()));
+        else if (act === 'school') {
+          const on = !School.isSchoolDay(this.key);
+          School.setSchoolDay(this.key, on);
+          toast(on ? '이 날 학교 시간표를 켰다' : '이 날 학교 시간표를 껐다(교시에 넣은 스택은 그대로 남는다)');
+        }
         else if (act === 'min') this.minimize();
         else if (act === 'close') this.close();
         else if (act === 'add') openSheet(this, {});
@@ -1374,7 +1557,7 @@
     render() {
       if (this.mode === 'closed') return;
       const key = this.key;
-      const highlightId = this.pendingHighlight;
+      const highlight = new Set([].concat(this.pendingHighlight || []));
       this.pendingHighlight = null;
       const d = parseKey(key);
       const day = Store.getDay(key);
@@ -1385,6 +1568,10 @@
       title.replaceChildren(document.createTextNode(`${d.getMonth() + 1}월 ${d.getDate()}일 `));
       title.append(el('span', d.getDay() === 0 ? 'sun' : d.getDay() === 6 ? 'sat' : null, WEEKDAYS[d.getDay()]));
       if (isToday) title.append(document.createTextNode(' '), el('span', 'today', '오늘'));
+      const holiday = School.holidayName(key);
+      if (holiday) title.append(document.createTextNode(' '), el('span', 'holiday', holiday));
+      const school = School.isSchoolDay(key);
+      this.schoolBtn.setAttribute('aria-pressed', String(school));
       this.root.setAttribute('aria-label', `${d.getFullYear()}년 ${d.getMonth() + 1}월 ${d.getDate()}일 시간표`);
 
       const dues = deadlinesOn(key);
@@ -1412,6 +1599,14 @@
       }
 
       // 기존 요소를 재사용해야 위치가 바뀔 때 부드럽게 움직인다
+      this.renderSchool(school);
+
+      // 나뉜 스택은 첫 조각이 아닌 것에 '이어서' 표시
+      const firstOfGroup = new Map();
+      day.stacks.forEach(s => {
+        if (s.group && (!firstOfGroup.has(s.group) || s.start < firstOfGroup.get(s.group).start)) firstOfGroup.set(s.group, s);
+      });
+
       const st = this.stacks;
       const existing = new Map([...st.querySelectorAll('.stack')].map(n => [n.dataset.id, n]));
       st.querySelector('.empty-hint')?.remove();
@@ -1436,10 +1631,13 @@
         existing.delete(s.id);
         placeStack(node, s);
         node.classList.toggle('selected', s.id === this.selectedId);
-        node.querySelector('.stack-name').textContent = s.name;
+        const cont = !!s.group && firstOfGroup.get(s.group).id !== s.id;
+        node.classList.toggle('cont', cont);
+        node.classList.toggle('split', !!s.group);
+        node.querySelector('.stack-name').textContent = cont ? `↳ ${s.name}` : s.name;
         node.querySelector('.stack-card').setAttribute('aria-label', `${s.name}, ${fmtTime(s.start)}부터 ${fmtDur(s.minutes)}`);
         if (st.children[i] !== node) st.insertBefore(node, st.children[i] || null);
-        if (isNew && s.id === highlightId) {
+        if (isNew && highlight.has(s.id)) {
           node.animate([{ transform: 'scale(0.6)', opacity: 0 }, { transform: 'none', opacity: 1 }], motion(SPRING_BOUNCY));
         }
       });
@@ -1464,8 +1662,24 @@
       this.updateNowLine();
     }
 
-    showDropPreview(start, color) {
-      if (start == null) {
+    // 학교 가는 날: 교시와 점심시간을 연한 배경으로 깐다
+    renderSchool(on) {
+      const sig = on ? 'on' : '';
+      if (this.schoolEl.dataset.sig === sig) return;
+      this.schoolEl.dataset.sig = sig;
+      if (!on) { this.schoolEl.replaceChildren(); return; }
+      this.schoolEl.replaceChildren(...[...School.PERIODS, School.LUNCH].map(p => {
+        const b = el('div', `period${p.id === 'lunch' ? ' lunch' : ''}`);
+        b.style.top = `${p.start * PPM}px`;
+        b.style.height = `${(p.end - p.start) * PPM}px`;
+        b.append(el('span', null, `${p.label} ${fmtTime(p.start)}–${fmtTime(p.end)}`));
+        return b;
+      }));
+    }
+
+    // 끌어 놓을 자리 미리 보기. at: { start, minutes } 또는 null
+    showDropPreview(at, color, text, bad) {
+      if (!at) {
         this.dropPreview?.remove();
         this.dropPreview = null;
         return;
@@ -1475,10 +1689,11 @@
         this.stacks.append(this.dropPreview);
       }
       const p = this.dropPreview;
-      p.style.setProperty('--c', color);
-      p.style.top = `${start * PPM}px`;
-      p.style.height = `${DROP_MIN * PPM}px`;
-      p.textContent = `${fmtTime(start)} – ${fmtTime(start + DROP_MIN)}`;
+      p.classList.toggle('bad', !!bad);
+      p.style.setProperty('--c', bad ? 'var(--danger)' : color);
+      p.style.top = `${at.start * PPM}px`;
+      p.style.height = `${at.minutes * PPM}px`;
+      p.textContent = text || `${fmtTime(at.start)} – ${fmtTime(at.start + at.minutes)}`;
     }
 
     updateNowLine() {
@@ -1556,7 +1771,10 @@
     node.style.setProperty('--c', s.color);
     node.classList.toggle('compact', h < 44);
     node.classList.toggle('tiny', h < 26);
-    node.querySelector('.stack-time').textContent = `${fmtTime(s.start)}–${fmtTime(s.start + s.minutes)} · ${fmtDur(s.minutes)}`;
+    node.classList.toggle('period', !!s.period);
+    node.querySelector('.stack-time').textContent = s.period
+      ? `${periodLabel(s.period)} · ${fmtTime(s.start)}–${fmtTime(s.start + s.minutes)}`
+      : `${fmtTime(s.start)}–${fmtTime(s.start + s.minutes)} · ${fmtDur(s.minutes)}`;
   }
 
   setInterval(() => wins.forEach(w => { if (w.mode === 'open') w.updateNowLine(); }), 30 * 1000);
@@ -1572,7 +1790,8 @@
     if (!node) return;
     const s = Store.getDay(w.key).stacks.find(x => x.id === node.dataset.id);
     if (!s) return;
-    const handle = e.target.closest('.sh');
+    let handle = e.target.closest('.sh');
+    if (handle && s.period) handle = null; // 교시 스택은 길이·폭이 고정
     gesture = {
       w, node, orig: s, cur: { ...s },
       sx: e.clientX, sy: e.clientY, lx: e.clientX, ly: e.clientY,
@@ -1603,6 +1822,7 @@
     g.mode = mode;
     g.node.classList.add('live');
     if (mode === 'move') g.node.classList.add('lifted');
+    else g.lim = Placement.limits(Store.getDay(g.w.key).stacks, g.orig, periodsOf(g.w.key));
     g.w.select(g.orig.id);
     document.body.classList.add(mode === 'move' ? 'dragging' : 'resizing');
     if (g.type !== 'mouse' && navigator.vibrate) navigator.vibrate(8);
@@ -1642,33 +1862,42 @@
         c.start = clamp(snap(o.start + dyMin, SNAP_MIN), 0, DAY_MIN - SNAP_MIN);
         c.x = clamp(snap(o.x + dx, SNAP_X), 0, 1 - o.w);
         break;
+      // 손잡이로 늘리고 줄일 때는 옆 스택·교시를 넘지 못한다
       case 't':
-        c.start = clamp(snap(o.start + dyMin, SNAP_MIN), 0, end - SNAP_MIN);
+        c.start = clamp(snap(o.start + dyMin, SNAP_MIN), g.lim.minStart, end - SNAP_MIN);
         c.minutes = end - c.start;
         break;
       case 'b':
-        c.minutes = clamp(snap(o.minutes + dyMin, SNAP_MIN), SNAP_MIN, 2 * DAY_MIN - o.start);
+        c.minutes = clamp(snap(o.minutes + dyMin, SNAP_MIN), SNAP_MIN, g.lim.maxEnd - o.start);
         break;
       case 'l':
-        c.x = clamp(snap(o.x + dx, SNAP_X), 0, o.x + o.w - MIN_W);
+        c.x = clamp(snap(o.x + dx, SNAP_X), g.lim.minX, o.x + o.w - MIN_W);
         c.w = o.x + o.w - c.x;
         break;
       case 'r':
-        c.w = clamp(snap(o.w + dx, SNAP_X), MIN_W, 1 - o.x);
+        c.w = clamp(snap(o.w + dx, SNAP_X), MIN_W, g.lim.maxR - o.x);
         break;
     }
     c.x = +c.x.toFixed(4);
     c.w = +c.w.toFixed(4);
     g.cur = c;
     placeStack(g.node, c);
+    // 옮기는 중에는 실제로 놓일 자리를 점선으로 보여 준다
+    if (g.mode === 'move') {
+      g.res = tryPlace(g.w.key, c);
+      const at = g.res.ok ? g.res.placed : c;
+      const same = g.res.ok && at.start === c.start && at.minutes === c.minutes && at.x === c.x;
+      g.w.showDropPreview(same ? null : at, c.color, g.res.ok ? placeHint(g.res) : g.res.note, !g.res.ok);
+    }
     updateTip();
   }
 
   function updateTip() {
-    const c = gesture.cur;
-    gesture.w.tip.textContent = gesture.mode === 'l' || gesture.mode === 'r'
-      ? `폭 ${Math.round(c.w * 100)}%`
-      : `${fmtTime(c.start)} – ${fmtTime(c.start + c.minutes)} · ${fmtDur(c.minutes)}`;
+    const g = gesture;
+    const c = g.cur;
+    if (g.mode === 'l' || g.mode === 'r') g.w.tip.textContent = `폭 ${Math.round(c.w * 100)}%`;
+    else if (g.mode === 'move' && g.res) g.w.tip.textContent = g.res.ok ? placeHint(g.res) : g.res.note;
+    else g.w.tip.textContent = `${fmtTime(c.start)} – ${fmtTime(c.start + c.minutes)} · ${fmtDur(c.minutes)}`;
   }
 
   // 위·아래 가장자리 근처에서는 저절로 스크롤
@@ -1699,6 +1928,7 @@
     g.node.classList.remove('live', 'lifted');
     document.body.classList.remove('dragging', 'resizing');
     g.w.tip.hidden = true;
+    g.w.showDropPreview(null);
     removeEventListener('pointermove', onGestureMove);
     removeEventListener('pointerup', onGestureEnd);
     removeEventListener('pointercancel', onGestureCancel);
@@ -1712,12 +1942,22 @@
       const c = g.cur;
       const o = g.orig;
       cleanupGesture();
-      if (c.start !== o.start || c.minutes !== o.minutes || c.x !== o.x || c.w !== o.w) {
+      if (c.start === o.start && c.minutes === o.minutes && c.x === o.x && c.w === o.w) return;
+      if (g.mode !== 'move') {
         Store.updateDay(g.w.key, day => {
           const s = day.stacks.find(x => x.id === c.id);
           if (s) Object.assign(s, { start: c.start, minutes: c.minutes, x: c.x, w: c.w });
         });
+        return;
       }
+      const res = tryPlace(g.w.key, c);
+      if (!res.ok) {
+        placeStack(g.node, o); // 제자리로
+        toast(res.note);
+        return;
+      }
+      commitPlace(g.w, res);
+      if (res.kind === 'split' || res.kind === 'period') toast(res.note);
       return;
     }
     const id = g.orig.id;
@@ -1956,20 +2196,31 @@
     const minutes = draftMinutes();
     if (!name || !minutes || !w || w.mode === 'closed') return;
     const start = draftStart();
-    let id = editingId;
-    Store.updateDay(w.key, day => {
-      if (id) {
-        const s = day.stacks.find(x => x.id === id);
-        if (s) Object.assign(s, { name, start, minutes, color: draftColor });
-      } else {
-        id = Store.newId();
-        w.pendingHighlight = id;
-        const s = { id, name, start, minutes, color: draftColor, x: 0, w: 1 };
-        if (draftTaskId) s.taskId = draftTaskId;
-        day.stacks.push(s);
-      }
-    });
+    const color = draftColor;
+    const old = editingId && Store.getDay(w.key).stacks.find(x => x.id === editingId);
+    let cand;
+    if (old) {
+      cand = { ...old, name, color, start, minutes };
+      if (minutes !== old.minutes) delete cand.baseMinutes; // 길이를 직접 바꾸면 그 길이를 원래 길이로
+    } else {
+      cand = { id: Store.newId(), name, color, start, minutes, x: 0, w: 1 };
+      if (draftTaskId) cand.taskId = draftTaskId;
+    }
+    const moved = !old || start !== old.start || minutes !== old.minutes;
+    if (moved) {
+      const res = tryPlace(w.key, cand);
+      if (!res.ok) { toast(res.note); return; } // 시트는 열어 둔다
+      // 나뉜 스택은 이름·색을 조각 모두에 맞춘다
+      if (old && old.group) res.stacks.forEach(x => { if (x.group === old.group) Object.assign(x, { name, color }); });
+      commitPlace(w, res);
+      if (res.note) toast(res.note);
+    } else {
+      Store.updateDay(w.key, day => {
+        day.stacks.forEach(x => { if (x.id === old.id || (old.group && x.group === old.group)) Object.assign(x, { name, color }); });
+      });
+    }
     closeSheet();
+    const id = cand.id;
     requestAnimationFrame(() => w.scrollToStack(id));
   });
 
@@ -1984,7 +2235,9 @@
     const node = w.stacks.querySelector(`.stack[data-id="${id}"]`);
     closeSheet();
     if (w.selectedId === id) w.selectedId = null;
-    const done = () => Store.updateDay(w.key, day => { day.stacks = day.stacks.filter(x => x.id !== id); });
+    const done = () => Store.updateDay(w.key, day => {
+      day.stacks = Placement.tidy(day.stacks.filter(x => x.id !== id), periodsOf(w.key));
+    });
     if (node) {
       node.animate([{ transform: 'none', opacity: 1 }, { transform: 'scale(0.85)', opacity: 0 }], { duration: 220, easing: 'ease-in', fill: 'forwards' })
         .finished.then(done);
@@ -2022,12 +2275,116 @@
     }
   });
 
+  // ───────── 설정 ─────────
+  const settingsEl = $('settings');
+  const settingsBtn = $('settings-btn');
+  const darkQuery = matchMedia('(prefers-color-scheme: dark)');
+  let theme = ui.theme || 'system';          // 'system' | 'light' | 'dark'
+  let weatherMode = !!ui.weatherMode;
+  let weatherPreview = ui.weatherPreview || 'auto';
+
+  const isDark = () => theme === 'dark' || (theme === 'system' && darkQuery.matches);
+  function applyTheme() {
+    if (theme === 'system') delete document.documentElement.dataset.theme;
+    else document.documentElement.dataset.theme = theme;
+    applySky(); // 물방울 색이 바탕에 따라 다르다
+  }
+
+  // 날씨 코드(WMO) → 배경 종류와 세기
+  function skyKind() {
+    if (weatherPreview !== 'auto') return { kind: weatherPreview, intensity: 1, night: false };
+    const w = Weather.get();
+    if (w.status !== 'ok') return { kind: 'clear', intensity: 1, night: false };
+    const c = w.current.code;
+    const night = !w.current.isDay;
+    if ((c >= 51 && c <= 67) || (c >= 80 && c <= 82) || c >= 95) {
+      const heavy = [55, 65, 67, 82, 95, 96, 99].includes(c), light = [51, 56, 61, 80].includes(c);
+      return { kind: 'rain', intensity: heavy ? 1.7 : light ? 0.6 : 1, night };
+    }
+    if ((c >= 71 && c <= 77) || c === 85 || c === 86) return { kind: 'snow', intensity: [75, 86].includes(c) ? 1.6 : 1, night };
+    if (c === 2 || c === 3 || c === 45 || c === 48) return { kind: 'cloud', intensity: 1, night };
+    return { kind: 'clear', intensity: 1, night };
+  }
+  function applySky() {
+    if (!weatherMode) { Sky.set(null); return; }
+    const k = skyKind();
+    Sky.set(k.kind, { intensity: k.intensity, night: k.night, dark: isDark() });
+  }
+
+  // 빗방울이 부딪치는 칸들. 위층(시간표 창)이 앞에 오도록 층 번호를 매긴다
+  Sky.setTargets(() => {
+    const rects = [];
+    const push = (elm, layer) => {
+      const r = elm.getBoundingClientRect();
+      if (r.width < 12 || r.height < 12) return;
+      rects.push({ el: elm, l: r.left, t: r.top, r: r.right, b: r.bottom, layer });
+    };
+    if (calendarEl.offsetParent) {
+      grid.querySelectorAll('.cell:not(.outside)').forEach(c => push(c, 1));
+      calendarEl.querySelectorAll('.segmented, #today-btn').forEach(c => push(c, 1));
+    }
+    if (tasksPane.offsetParent) push(tasksPane, 1);
+    wins.forEach((w, i) => { if (w.mode === 'open' && !w.root.hidden) push(w.root, 2 + i); });
+    rects.sort((a, b) => b.layer - a.layer);
+    return { rects, top: document.querySelector('.topbar').getBoundingClientRect().bottom };
+  });
+
+  function syncSettings() {
+    $('theme-seg').querySelectorAll('[data-v]').forEach(b => b.setAttribute('aria-checked', String(b.dataset.v === theme)));
+    $('wx-mode').checked = weatherMode;
+    $('wx-preview-row').hidden = !weatherMode;
+    $('wx-preview').querySelectorAll('[data-v]').forEach(b => b.setAttribute('aria-checked', String(b.dataset.v === weatherPreview)));
+  }
+
+  function setSettingsOpen(open) {
+    if (open === !settingsEl.hidden && !settingsEl.getAnimations().length) return;
+    settingsBtn.setAttribute('aria-expanded', String(open));
+    settingsEl.getAnimations().forEach(a => a.cancel());
+    if (open) {
+      settingsEl.hidden = false;
+      syncSettings();
+      settingsEl.animate([{ opacity: 0, transform: 'translateY(-8px) scale(0.96)' }, { opacity: 1, transform: 'none' }], motion(SPRING_BOUNCY));
+    } else {
+      const a = settingsEl.animate([{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'translateY(-6px) scale(0.97)' }], { duration: 160, easing: 'ease-in', fill: 'forwards' });
+      a.onfinish = () => { settingsEl.hidden = true; a.cancel(); };
+    }
+  }
+  settingsBtn.addEventListener('click', () => setSettingsOpen(settingsBtn.getAttribute('aria-expanded') !== 'true'));
+  document.addEventListener('pointerdown', e => {
+    if (!settingsEl.hidden && !e.target.closest('#settings, #settings-btn')) setSettingsOpen(false);
+  });
+  $('theme-seg').addEventListener('click', e => {
+    const b = e.target.closest('[data-v]');
+    if (!b) return;
+    theme = b.dataset.v;
+    Store.setUI({ theme });
+    applyTheme();
+    syncSettings();
+  });
+  $('wx-mode').addEventListener('change', e => {
+    weatherMode = e.target.checked;
+    Store.setUI({ weatherMode });
+    applySky();
+    syncSettings();
+  });
+  $('wx-preview').addEventListener('click', e => {
+    const b = e.target.closest('[data-v]');
+    if (!b) return;
+    weatherPreview = b.dataset.v;
+    Store.setUI({ weatherPreview });
+    applySky();
+    syncSettings();
+  });
+  darkQuery.addEventListener('change', applySky);
+  Weather.subscribe(applySky);
+
   // ───────── 키보드 ─────────
   // 창 관련 키는 맨 앞 창에 적용한다
   document.addEventListener('keydown', e => {
     const w = activeWin();
     if (e.key === 'Escape') {
-      if (!sheet.hidden) closeSheet();
+      if (!settingsEl.hidden) setSettingsOpen(false);
+      else if (!sheet.hidden) closeSheet();
       else if (w && w.selectedId) w.select(null);
       else if (w) w.close();
       return;
@@ -2048,8 +2405,13 @@
 
   // 데이터가 바뀌면 화면 갱신
   const renderWins = () => wins.forEach(w => w.render());
+  School.subscribe(() => {
+    renderMonth();
+    renderWins();
+  });
   Store.subscribe(() => {
     renderMonth();
+    renderTasks(); // 이번 주 할 일의 '시간표에 올림' 표시
     renderWins();
   });
   [Google, Microsoft].forEach(p => p.subscribe(() => {
@@ -2071,6 +2433,7 @@
   }, 60 * 1000);
 
   tickClock();
+  applyTheme();
   renderWeather();
   renderMonth();
   renderTasks();
