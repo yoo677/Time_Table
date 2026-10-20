@@ -14,8 +14,22 @@
   <link rel="icon" href="icons/icon-192.png" type="image/png">
   <link rel="apple-touch-icon" href="icons/icon-180.png">
   <link rel="stylesheet" href="styles.css">
+  <script>
+    // 화면이 그려지기 전에 라이트/다크 설정을 먼저 적용해 깜빡임을 막는다
+    try {
+      var theme = (JSON.parse(localStorage.getItem('timetable.ui') || '{}') || {}).theme;
+      if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
+    } catch (e) {}
+  </script>
 </head>
 <body>
+  <!-- 날씨 모드 배경: 하늘색·구름(뒤), 빗방울·눈송이(앞) -->
+  <div id="sky" class="sky" hidden aria-hidden="true">
+    <span class="blob b1"></span><span class="blob b2"></span><span class="blob b3"></span>
+    <span class="blob b4"></span><span class="blob b5"></span><span class="blob b6"></span>
+  </div>
+  <canvas id="sky-fx" class="sky-fx" hidden aria-hidden="true"></canvas>
+
   <div id="app" class="app" data-tab="calendar">
     <!-- 맨 위: 날짜, 시계, 날씨 -->
     <header class="topbar">
@@ -32,6 +46,9 @@
           <span id="wx-desc" class="wx-desc"></span>
         </span>
         <span id="wx-place" class="wx-place"></span>
+      </button>
+      <button type="button" id="settings-btn" class="gear-btn" aria-label="설정" aria-expanded="false" aria-controls="settings">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
       </button>
     </header>
 
@@ -99,6 +116,7 @@
           <p class="win-summary"></p>
         </div>
         <div class="win-controls">
+          <button type="button" class="tb-btn text school-btn" data-act="school" aria-pressed="false" title="이 날 학교 시간표 켜고 끄기">학교</button>
           <button type="button" class="tb-btn" data-act="min" aria-label="최소화" title="최소화">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 12h12"/></svg>
           </button>
@@ -111,6 +129,7 @@
         <div class="timeline-scroll">
           <div class="timeline">
             <div class="hours"></div>
+            <div class="school"></div>
             <div class="stacks"></div>
             <div class="deadlines"></div>
             <div class="now-line" hidden></div>
@@ -180,14 +199,47 @@
     </div>
   </form>
 
+  <!-- 설정 -->
+  <div id="settings" class="settings" hidden role="dialog" aria-labelledby="settings-title">
+    <h3 id="settings-title" class="settings-title">설정</h3>
+    <div class="set-row">
+      <div class="set-text"><div class="set-name">화면 모드</div></div>
+      <div id="theme-seg" class="seg" role="radiogroup" aria-label="화면 모드">
+        <button type="button" role="radio" data-v="system">시스템</button>
+        <button type="button" role="radio" data-v="light">라이트</button>
+        <button type="button" role="radio" data-v="dark">다크</button>
+      </div>
+    </div>
+    <label class="set-row">
+      <div class="set-text">
+        <div class="set-name">날씨 모드</div>
+        <div class="set-sub">지금 날씨로 배경이 바뀐다. 비·눈이 오면 빗방울이 칸에 맺혔다가 흘러내린다</div>
+      </div>
+      <input type="checkbox" id="wx-mode" class="switch">
+    </label>
+    <div id="wx-preview-row" class="set-row" hidden>
+      <div class="set-text"><div class="set-name">날씨 미리 보기</div></div>
+      <div id="wx-preview" class="seg" role="radiogroup" aria-label="날씨 미리 보기">
+        <button type="button" role="radio" data-v="auto">지금</button>
+        <button type="button" role="radio" data-v="clear">맑음</button>
+        <button type="button" role="radio" data-v="cloud">흐림</button>
+        <button type="button" role="radio" data-v="rain">비</button>
+        <button type="button" role="radio" data-v="snow">눈</button>
+      </div>
+    </div>
+  </div>
+
   <div id="toast" class="toast" hidden role="status"></div>
 
   <script src="config.js"></script>
   <script src="store.js"></script>
+  <script src="school.js"></script>
+  <script src="placement.js"></script>
   <script src="sources.js"></script>
   <script src="google.js"></script>
   <script src="microsoft.js"></script>
   <script src="weather.js"></script>
+  <script src="sky.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
