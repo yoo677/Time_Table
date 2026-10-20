@@ -126,28 +126,82 @@
       $('wx-desc').textContent = '';
       $('wx-place').textContent = '';
       nowBtn.title = w.error || '';
-      $('wx-hourly').replaceChildren();
+      drawTempGraph();
       return;
     }
     const cur = Weather.describe(w.current.code, w.current.isDay);
     $('wx-icon').textContent = cur.icon;
     $('wx-temp').textContent = `${w.current.temp}°`;
-    $('wx-desc').textContent = `${cur.text} · 체감 ${w.current.feels}°`;
+    $('wx-desc').textContent = cur.text;
     $('wx-place').textContent = w.place ? `${w.approximate ? '≈ ' : ''}${w.place}` : '';
     nowBtn.title = w.approximate
       ? '위치 권한이 없어 서울 기준으로 보여 준다'
       : `${w.place || '현재 위치'} · ${w.fetchedAt ? new Date(w.fetchedAt).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' }) : ''} 갱신`;
 
-    $('wx-hourly').replaceChildren(...w.hourly.map((h, i) => {
-      const d = Weather.describe(h.code, h.isDay);
-      const cell = el('div', `wx-h${i === 0 ? ' now' : ''}`);
-      cell.title = `${h.hour}시 ${d.text}${h.pop != null ? ` · 강수 ${h.pop}%` : ''}`;
-      const time = el('span', 'wx-h-time', i === 0 ? '지금' : `${h.hour}시`);
-      if (h.pop >= 30) time.append(el('span', 'wx-h-pop', ` ${h.pop}%`));
-      cell.append(time, el('span', 'wx-h-icon', d.icon), el('span', 'wx-h-temp', `${h.temp}°`));
-      return cell;
-    }));
+    drawTempGraph();
   }
+
+  // 시간별 기온을 꺾은선 하나로 그린다. 기온 숫자는 지금·최고·최저에만 붙이고, 나머지는 올리면 보인다
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  const svgEl = (tag, attrs) => {
+    const e = document.createElementNS(SVG_NS, tag);
+    Object.entries(attrs || {}).forEach(([k, v]) => e.setAttribute(k, v));
+    return e;
+  };
+  function drawTempGraph() {
+    const box = $('wx-hourly');
+    const w = Weather.get();
+    const hours = w.status === 'ok' ? w.hourly : [];
+    const W = box.clientWidth, H = box.clientHeight;
+    if (!hours.length || !W || !H) { box.replaceChildren(); return; }
+
+    const padX = 14, top = 14, bottom = 14;
+    const temps = hours.map(h => h.temp);
+    const lo = Math.min(...temps), hi = Math.max(...temps);
+    const span = Math.max(hi - lo, 4); // 거의 평평한 날에 작은 차이가 과장되지 않게
+    const mid = (hi + lo) / 2;
+    const step = (W - padX * 2) / (hours.length - 1);
+    const xOf = i => padX + i * step;
+    const yOf = t => top + (H - top - bottom) * (0.5 - (t - mid) / span);
+    const pts = hours.map((h, i) => [xOf(i), yOf(h.temp)]);
+
+    const svg = svgEl('svg', { width: W, height: H, viewBox: `0 0 ${W} ${H}`, class: 'wx-graph' });
+    const defs = svgEl('defs');
+    const grad = svgEl('linearGradient', { id: 'wx-fill', x1: 0, y1: 0, x2: 0, y2: 1 });
+    grad.append(svgEl('stop', { offset: '0', class: 'wx-fill-top' }), svgEl('stop', { offset: '1', class: 'wx-fill-bottom' }));
+    defs.append(grad);
+    const line = pts.map((p, i) => `${i ? 'L' : 'M'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join('');
+    const baseY = H - bottom;
+    svg.append(
+      defs,
+      svgEl('path', { d: `${line}L${pts[pts.length - 1][0]},${baseY}L${pts[0][0]},${baseY}Z`, fill: 'url(#wx-fill)' }),
+      svgEl('path', { d: line, class: 'wx-line' }),
+    );
+
+    const iMax = temps.indexOf(hi), iMin = temps.indexOf(lo);
+    const every = step < 30 ? 3 : 2;
+    hours.forEach((h, i) => {
+      const [x, y] = pts[i];
+      const g = svgEl('g', { class: `wx-pt${i === 0 ? ' now' : ''}` });
+      const d = Weather.describe(h.code, h.isDay);
+      const title = svgEl('title');
+      title.textContent = `${i === 0 ? '지금' : `${h.hour}시`} ${h.temp}° · ${d.text}${h.pop != null ? ` · 강수 ${h.pop}%` : ''}`;
+      g.append(title, svgEl('rect', { x: x - step / 2, y: 0, width: step, height: H, class: 'wx-hit' }));
+      g.append(svgEl('circle', { cx: x, cy: y, r: i === 0 ? 3.5 : 3, class: 'wx-dot' }));
+      const labelled = i === 0 || i === iMax || i === iMin;
+      const tv = svgEl('text', { x, y: y - 6, class: `wx-val${labelled ? ' on' : ''}` });
+      tv.textContent = `${h.temp}°`;
+      g.append(tv);
+      if (i % every === 0) {
+        const th = svgEl('text', { x, y: H - 2, class: 'wx-hr' });
+        th.textContent = i === 0 ? '지금' : `${h.hour}시`;
+        g.append(th);
+      }
+      svg.append(g);
+    });
+    box.replaceChildren(svg);
+  }
+  addEventListener('resize', () => requestAnimationFrame(drawTempGraph));
 
   // 폰에서는 시간별 예보를 접어 두고, 현재 날씨를 누르면 편다. 넓은 화면에서는 누르면 새로 받는다
   $('wx-now').addEventListener('click', e => {
@@ -158,6 +212,7 @@
     const from = open ? 0 : hourly.getBoundingClientRect().height;
     hourly.getAnimations().forEach(a => a.cancel());
     hourly.classList.add('show');
+    if (open) drawTempGraph();
     const a = animateHeight(hourly, from, open ? hourly.offsetHeight : 0, open ? SPRING_SMOOTH : EASE_OUT);
     a.onfinish = () => {
       hourly.style.overflow = '';
@@ -308,34 +363,54 @@
     });
   }
 
-  function slideGrid(dir) {
+  // 달을 넘길 때: 지난달 칸들은 반대쪽으로 밀려 사라지고 새 달 칸들이 들어온다
+  const calendarEl = $('calendar');
+  function slideGrid(dir, oldGrid) {
+    calendarEl.querySelectorAll('.grid-ghost').forEach(g => g.remove());
+    if (oldGrid && !REDUCED.matches) {
+      const r = grid.getBoundingClientRect(), pr = calendarEl.getBoundingClientRect();
+      oldGrid.removeAttribute('id');
+      oldGrid.classList.add('grid-ghost');
+      oldGrid.setAttribute('aria-hidden', 'true');
+      Object.assign(oldGrid.style, { left: `${r.left - pr.left}px`, top: `${r.top - pr.top}px`, width: `${r.width}px`, height: `${r.height}px` });
+      calendarEl.append(oldGrid);
+      oldGrid.animate(
+        [{ transform: 'none', opacity: 1 }, { transform: `translateX(${-dir * 22}%)`, opacity: 0 }],
+        { duration: 300, easing: 'cubic-bezier(0.32, 0.72, 0, 1)', fill: 'forwards' }
+      ).finished.then(() => oldGrid.remove());
+    }
     grid.animate(
-      [{ transform: `translateX(${dir * 40}px)`, opacity: 0 }, { transform: 'none', opacity: 1 }],
+      [{ transform: `translateX(${dir * 22}%)`, opacity: 0 }, { transform: 'none', opacity: 1 }],
       motion(SPRING_SMOOTH)
     );
   }
   function shiftMonth(delta) {
+    const old = grid.cloneNode(true);
     viewMonth = new Date(viewMonth.getFullYear(), viewMonth.getMonth() + delta, 1);
     renderMonth();
-    slideGrid(delta);
+    slideGrid(delta, old);
   }
   // 그 날짜가 있는 달로 넘긴다. 넘겼으면 true
   function showMonthOf(d, animate) {
     const delta = (d.getFullYear() - viewMonth.getFullYear()) * 12 + d.getMonth() - viewMonth.getMonth();
     if (!delta) return false;
+    const old = animate ? grid.cloneNode(true) : null;
     viewMonth = new Date(d.getFullYear(), d.getMonth(), 1);
     renderMonth();
-    if (animate) slideGrid(Math.sign(delta));
+    if (animate) slideGrid(Math.sign(delta), old);
     return true;
+  }
+  function pulseCell(key, delay) {
+    grid.querySelector(`.cell[data-key="${key}"]`)?.animate(
+      [{ transform: 'scale(1)' }, { transform: 'scale(1.1)' }, { transform: 'scale(1)' }],
+      { ...motion(SPRING_BOUNCY), delay: REDUCED.matches ? 0 : delay || 0 }
+    );
   }
 
   function goToday() {
     if (innerWidth < 900) setTab('calendar');
-    showMonthOf(new Date(), true);
-    grid.querySelector('.cell.today')?.animate(
-      [{ transform: 'scale(1)' }, { transform: 'scale(1.1)' }, { transform: 'scale(1)' }],
-      motion(SPRING_BOUNCY)
-    );
+    const moved = showMonthOf(new Date(), true);
+    pulseCell(keyOf(new Date()), moved ? 220 : 0);
   }
 
   $('prev-month').addEventListener('click', () => shiftMonth(-1));
@@ -344,7 +419,15 @@
 
   grid.addEventListener('click', e => {
     const cell = e.target.closest('.cell');
-    if (cell) openDay(cell.dataset.key, cell);
+    if (!cell) return;
+    // 앞뒤 달의 날짜를 누르면 그 달로 넘어간다. 그 달에서 다시 누르면 시간표가 열린다
+    if (cell.classList.contains('outside')) {
+      const key = cell.dataset.key;
+      showMonthOf(parseKey(key), true);
+      pulseCell(key, 220);
+      return;
+    }
+    openDay(cell.dataset.key, cell);
   });
 
   // 좌우로 밀어서 달 넘기기
