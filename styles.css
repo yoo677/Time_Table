@@ -154,10 +154,14 @@ svg {
 .calendar, .win-body, .tabbar, .dock, .topbar { user-select: none; -webkit-user-select: none; }
 
 .calendar {
+  position: relative;
   flex: 1;
   min-width: 360px;
   display: flex;
   flex-direction: column;
+  /* 달이 넘어갈 때 칸이 옆 패널 위로 밀려 나가지 않게. 그림자는 남긴다 */
+  overflow: clip;
+  overflow-clip-margin: 14px;
 }
 
 .tasks {
@@ -235,19 +239,25 @@ svg {
 
 /* ───────── 맨 위 줄: 날짜, 시계, 날씨 ───────── */
 
+/* 화면 폭 끝까지 이어지는 흰 띠. 아래 회색 영역과 경계선으로 나뉜다 */
 .topbar {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding-bottom: 12px;
+  gap: 12px;
   min-width: 0;
+  min-height: 64px;
+  margin: calc(-1 * (var(--safe-t) + 12px)) calc(-1 * (var(--safe-r) + 16px)) 14px calc(-1 * (var(--safe-l) + 16px));
+  padding: calc(var(--safe-t) + 6px) calc(var(--safe-r) + 16px) 6px calc(var(--safe-l) + 20px);
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  box-shadow: 0 1px 8px rgba(0, 0, 0, 0.03);
 }
 
 .clock {
+  flex: 1;
   display: flex;
   align-items: baseline;
   gap: 10px;
-  padding: 0 4px;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
@@ -259,75 +269,60 @@ svg {
   align-items: center;
   gap: 8px;
   height: 44px;
-  padding: 0 12px;
+  padding: 0 10px;
   border-radius: var(--r);
-  background: var(--surface);
-  box-shadow: var(--shadow);
   text-align: left;
   white-space: nowrap;
   flex-shrink: 0;
-  transition: transform 0.2s var(--ease);
+  transition: transform 0.2s var(--ease), background-color 0.2s;
 }
+.wx-now:hover { background: var(--surface-2); }
 .wx-now:active { transform: scale(0.97); }
-.wx-icon { font-size: 22px; line-height: 1; }
-.wx-text { display: flex; align-items: baseline; gap: 6px; }
-.wx-text strong { font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; }
-.wx-desc { font-size: 12px; color: var(--text-2); }
-.wx-place { font-size: 12px; color: var(--text-2); padding-left: 8px; border-left: 1px solid var(--line); }
+.wx-icon { font-size: 24px; line-height: 1; }
+.wx-text { display: flex; flex-direction: column; line-height: 1.15; }
+.wx-text strong { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.wx-desc { font-size: 11px; color: var(--text-2); }
+.wx-place { font-size: 12px; color: var(--text-2); padding-left: 10px; border-left: 1px solid var(--line); }
 
+/* 시간별 기온 그래프 */
 .wx-hourly {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  gap: 2px;
-  height: 44px;
-  padding: 0 4px;
-  border-radius: var(--r);
-  background: var(--surface);
-  box-shadow: var(--shadow);
-  overflow-x: auto;
-  scrollbar-width: none;
+  width: min(440px, 36vw);
+  height: 52px;
+  flex-shrink: 0;
 }
-.wx-hourly::-webkit-scrollbar { display: none; }
-.wx-hourly:empty { visibility: hidden; }
-.wx-h {
-  position: relative;
-  flex: 1 0 auto;
-  min-width: 52px;
-  display: grid;
-  grid-template-columns: auto auto;
-  grid-template-rows: 1fr 1fr;
-  align-items: center;
-  justify-content: center;
-  column-gap: 4px;
-  padding: 3px 4px;
+.wx-graph { display: block; width: 100%; height: 100%; overflow: visible; stroke: none; }
+.wx-line { fill: none; stroke: var(--warn); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.wx-fill-top { stop-color: var(--warn); stop-opacity: 0.16; }
+.wx-fill-bottom { stop-color: var(--warn); stop-opacity: 0; }
+.wx-hit { fill: transparent; }
+.wx-dot { fill: var(--warn); stroke: var(--surface); stroke-width: 2; opacity: 0; transition: opacity 0.15s; }
+.wx-pt.now .wx-dot, .wx-pt:hover .wx-dot { opacity: 1; }
+.wx-val, .wx-hr {
+  font-size: 10px;
+  text-anchor: middle;
   font-variant-numeric: tabular-nums;
+  fill: var(--text-2);
+  stroke: none;
 }
-.wx-h + .wx-h::before {
-  content: "";
-  position: absolute;
-  left: -1px;
-  top: 10px;
-  bottom: 10px;
-  border-left: 1px solid var(--line);
-}
-.wx-h-time { grid-column: 1 / 3; text-align: center; font-size: 11px; color: var(--text-2); }
-.wx-h.now .wx-h-time { color: var(--accent); font-weight: 700; }
-.wx-h-icon { font-size: 15px; line-height: 1; }
-.wx-h-temp { font-size: 13px; font-weight: 600; }
-.wx-h-pop { font-size: 10px; color: var(--src-tasks); font-weight: 600; }
+.wx-val { font-weight: 600; fill: var(--text); opacity: 0; transition: opacity 0.15s; }
+.wx-val.on, .wx-pt:hover .wx-val { opacity: 1; }
+.wx-pt.now .wx-hr { fill: var(--accent); font-weight: 700; }
 
 @media (max-width: 639px) {
   .app { padding-top: calc(var(--safe-t) + 8px); }
-  .topbar { flex-wrap: wrap; gap: 8px; padding-bottom: 10px; }
-  .clock { flex: 1; flex-direction: column; gap: 0; }
+  .topbar {
+    flex-wrap: wrap;
+    gap: 4px 8px;
+    margin-top: calc(-1 * (var(--safe-t) + 8px));
+    margin-bottom: 10px;
+  }
+  .clock { flex-direction: column; gap: 0; }
   .clock-date { font-size: 12px; }
   .clock-time { font-size: 20px; }
   .wx-place { display: none; }
-  .wx-desc { display: none; }
-  /* 폰에서는 접어 두고 현재 날씨를 누르면 편다 */
-  .wx-hourly { display: none; flex-basis: 100%; }
-  .wx-hourly.show { display: flex; }
+  /* 폰에서는 그래프를 접어 두고 현재 날씨를 누르면 아래 줄에 편다 */
+  .wx-hourly { display: none; order: 3; width: 100%; }
+  .wx-hourly.show { display: block; }
 }
 
 /* ───────── 달력 ───────── */
@@ -379,6 +374,7 @@ svg {
 .weekdays .sun { color: var(--sun); }
 .weekdays .sat { color: var(--sat); }
 
+.grid-ghost { position: absolute; pointer-events: none; }
 .grid {
   flex: 1;
   min-height: 0;
