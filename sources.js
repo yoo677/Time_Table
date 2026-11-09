@@ -2,7 +2,8 @@
 // 연동 모듈(google.js 등)이 setItems(accountId, items)로 채운다. 마지막 결과는 저장해 두어
 // 다시 열었을 때 로그인 전에도 목록이 보인다.
 // 항목: { id, source: 'classroom'|'tasks'|'teams', account: 'personal'|'school'|'local',
-//         title, course, due: ISO 문자열|null, hasTime: bool, done: bool, link, ref }
+//         title, course, due: ISO 문자열|null, hasTime: bool, done: bool, link, ref,
+//         week?: bool }  week는 기한과 상관없이 '이번주에 할 일'에 넣는 항목
 (() => {
   'use strict';
 
@@ -46,7 +47,7 @@
   }
 
   // due는 'YYYY-MM-DD' 또는 null. 날짜만 있는 할 일로 저장한다
-  function addLocal(title, due) {
+  function addLocal(title, due, week) {
     let iso = null;
     if (due) {
       const [y, m, d] = due.split('-').map(Number);
@@ -62,6 +63,7 @@
       hasTime: false,
       done: false,
       link: null,
+      ...(week ? { week: true } : {}),
     });
     persistLocal();
     emit();

@@ -639,7 +639,7 @@
 
   // 할 일 묶음. 항목은 위에서부터 처음 맞는 묶음에 들어간다
   const SECTIONS = [
-    { id: 'week', title: '이번주에 할 일', sub: '', match: () => false, week: true },
+    { id: 'week', title: '이번주에 할 일', sub: '', match: () => false, week: true, canAdd: true },
     { id: 'school', title: '학교', sub: 'Classroom · Teams', match: it => it.account === 'school' },
     { id: 'outside', title: '학교 외', sub: 'Classroom', match: it => it.source === 'classroom' },
     { id: 'mine', title: 'Tasks', sub: '내 할 일 목록', match: it => it.source === 'tasks', canAdd: true },
@@ -658,7 +658,7 @@
   const dueMs = it => { const t = dueTime(it); return t ? t.getTime() : Infinity; };
 
   // ───────── 이번주에 할 일 ─────────
-  // 기한이 이번 주(월~일)인 항목. 체크한 것은 원래 목록에서 사라져도(Tasks 완료 등) 그 주 동안 기억해 둔다.
+  // 기한이 이번 주(월~일)인 항목과, 구글 Tasks '이번주의 할일' 목록(또는 이 기기)에 직접 넣은 항목. 체크한 것은 원래 목록에서 사라져도(Tasks 완료 등) 그 주 동안 기억해 둔다.
   // 체크하고 월~금 시간표에도 올린 것이 '끝난 할 일'이다. 모두 끝나면 묶음이 아주 작게 줄어든다.
   const WEEK_KEY = 'timetable.week';
   const weekStart = (d = new Date()) => addDays(new Date(d.getFullYear(), d.getMonth(), d.getDate()), -((d.getDay() + 6) % 7));
@@ -693,7 +693,7 @@
     const checked = weekChecks();
     const mon = weekStart(), end = addDays(mon, 7);
     const sched = scheduledTaskIds();
-    const live = all.filter(it => { const t = dueTime(it); return t && t >= mon && t < end; });
+    const live = all.filter(it => { const t = dueTime(it); return it.week || (t && t >= mon && t < end); });
     const liveIds = new Set(live.map(it => it.id));
     const list = [...live, ...Object.values(checked).filter(snap => !liveIds.has(snap.id))];
     weekInfo.clear();
@@ -820,13 +820,14 @@
     return row;
   }
 
-  // 할 일 추가 입력줄. 다시 그려도 입력 중인 내용이 남도록 한 번만 만든다
-  const addForm = (() => {
+  // 할 일 추가 입력줄. 묶음마다 하나씩, 다시 그려도 입력 중인 내용이 남도록 한 번만 만든다.
+  // week: '이번주에 할 일'에 넣는다(구글 Tasks의 '이번주의 할일' 목록, 연결 전이면 이 기기)
+  function makeAddForm(secId, week) {
     const f = el('form', 'task-add');
     f.hidden = true;
     f.autocomplete = 'off';
     const title = el('input', 'task-add-title');
-    title.placeholder = '새 할 일';
+    title.placeholder = week ? '이번 주에 할 일' : '새 할 일';
     title.maxLength = 120;
     title.enterKeyHint = 'done';
     const date = el('input', 'task-add-date');
@@ -842,10 +843,10 @@
       ok.disabled = true;
       try {
         if (Google.canAddTask()) {
-          await Google.addTask(name, date.value || null);
-          toast('Google Tasks에 추가했다');
+          await Google.addTask(name, date.value || null, week);
+          toast(week ? `Google Tasks의 '${Google.WEEK_LIST}' 목록에 추가했다` : 'Google Tasks에 추가했다');
         } else {
-          Sources.addLocal(name, date.value || null);
+          Sources.addLocal(name, date.value || null, week);
           toast('이 기기에 저장했다. Google 개인 계정을 연결해 두면 Tasks에 바로 들어간다');
         }
         title.value = '';
@@ -857,28 +858,36 @@
         ok.disabled = false;
       }
     });
-    f.addEventListener('keydown', e => { if (e.key === 'Escape') { e.stopPropagation(); toggleAddForm(false); } });
-    return { f, title };
-  })();
+    f.addEventListener('keydown', e => { if (e.key === 'Escape') { e.stopPropagation(); toggleAddForm(secId, false); } });
+    return { f, title, date };
+  }
+  const addForms = { week: makeAddForm('week', true), mine: makeAddForm('mine', false) };
 
-  function toggleAddForm(open) {
-    const sec = taskList.querySelector('.sec[data-sec="mine"]');
-    if (open && collapsed.has('mine')) {
-      addForm.f.hidden = false;
-      toggleSection('mine');
+  function toggleAddForm(id, open) {
+    const form = addForms[id];
+    const sec = taskList.querySelector(`.sec[data-sec="${id}"]`);
+    if (id === 'week' && open) {
+      // 기한은 이번 주 안에서만 고르게 한다
+      const mon = weekStart();
+      form.date.min = keyOf(mon);
+      form.date.max = keyOf(addDays(mon, 6));
+    }
+    if (open && collapsed.has(id)) {
+      form.f.hidden = false;
+      toggleSection(id);
     } else {
       const body = sec && sec.querySelector('.sec-body');
       const from = body ? body.offsetHeight : 0;
-      addForm.f.hidden = !open;
+      form.f.hidden = !open;
       if (body) animateHeight(body, from, body.offsetHeight, open ? SPRING_SMOOTH : EASE_OUT);
     }
     sec?.querySelector('.sec-add')?.setAttribute('aria-expanded', String(open));
-    if (open) setTimeout(() => addForm.title.focus(), 30);
+    if (open) setTimeout(() => form.title.focus(), 30);
   }
 
   function fillBody(body, def, items, now) {
     body.replaceChildren();
-    if (def.canAdd) body.append(addForm.f);
+    if (def.canAdd) body.append(addForms[def.id].f);
     if (!items.length) {
       body.append(el('p', 'sec-empty', def.week ? '이번 주가 기한인 할 일이 없다' : def.canAdd ? '할 일이 없다. + 버튼으로 추가한다' : '남은 과제가 없다'));
       return;
@@ -963,10 +972,10 @@
       if (def.canAdd) {
         const add = el('button', 'icon-btn sec-add');
         add.type = 'button';
-        add.setAttribute('aria-label', '할 일 추가');
-        add.setAttribute('aria-expanded', String(!addForm.f.hidden));
+        add.setAttribute('aria-label', def.week ? '이번 주에 할 일 추가' : '할 일 추가');
+        add.setAttribute('aria-expanded', String(!addForms[def.id].f.hidden));
         add.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
-        add.addEventListener('click', () => toggleAddForm(addForm.f.hidden));
+        add.addEventListener('click', () => toggleAddForm(def.id, addForms[def.id].f.hidden));
         head.append(add);
       }
       const body = el('div', 'sec-body');
@@ -975,7 +984,7 @@
       frag.append(sec);
     });
     // 입력줄을 옮기면 포커스가 풀리니 다시 잡아 준다
-    const focused = addForm.f.contains(document.activeElement) ? document.activeElement : null;
+    const focused = Object.values(addForms).some(a => a.f.contains(document.activeElement)) ? document.activeElement : null;
     taskList.replaceChildren(frag);
     if (focused) focused.focus({ preventScroll: true });
   }
@@ -1028,7 +1037,7 @@
       const probe = el('div', 'sec-body');
       probe.style.cssText = `position:absolute;visibility:hidden;width:${body.offsetWidth}px`;
       fillBody(probe, def, sorted, now);
-      if (def.canAdd) body.prepend(addForm.f); // fillBody가 가져간 입력줄을 되돌린다
+      if (def.canAdd) body.prepend(addForms[def.id].f); // fillBody가 가져간 입력줄을 되돌린다
       sec.append(probe);
       const to = probe.offsetHeight;
       probe.remove();

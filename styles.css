@@ -1603,6 +1603,8 @@ svg {
 .sec.week.all-done .task-check.on::after { left: 2.5px; top: 0; width: 3px; height: 6px; border-width: 0 1.5px 1.5px 0; }
 .sec.week.all-done .sched svg { width: 10px; height: 10px; }
 .sec.week.all-done .sched { width: 12px; height: 12px; }
+.sec.week.all-done .sec-add { width: 18px; height: 18px; }
+.sec.week.all-done .sec-add svg { width: 11px; height: 11px; }
 
 /* ───────── 설정 ───────── */
 

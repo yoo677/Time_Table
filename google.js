@@ -17,6 +17,9 @@
     'https://www.googleapis.com/auth/classroom.coursework.me.readonly',
   ];
   const TASKS_SCOPE = 'https://www.googleapis.com/auth/tasks';
+  const TASKS = 'https://tasks.googleapis.com/tasks/v1';
+  // 이 이름의 Tasks 목록에 든 할 일은 기한과 상관없이 '이번주에 할 일'에 나온다. 없으면 처음 추가할 때 만든다
+  const WEEK_LIST = '이번주의 할일';
 
   const ACCOUNTS = [
     { id: 'google-personal', kind: 'personal', label: 'Google 개인 계정', services: ['Classroom', 'Tasks'], tasks: true },
@@ -193,7 +196,7 @@
   }
 
   async function fetchTasks(acc) {
-    const T = 'https://tasks.googleapis.com/tasks/v1';
+    const T = TASKS;
     const lists = await listAll(acc.id, `${T}/users/@me/lists?maxResults=100`, 'items');
     const perList = await mapLimit(lists, 4, list =>
       listAll(acc.id, `${T}/lists/${encodeURIComponent(list.id)}/tasks?showCompleted=false&showHidden=false&maxResults=100`, 'items')
@@ -204,12 +207,13 @@
             source: 'tasks',
             account: acc.kind,
             title: t.title,
-            course: lists.length > 1 ? list.title : null,
+            course: lists.length > 1 && list.title !== WEEK_LIST ? list.title : null,
             due: tasksDue(t.due),
             hasTime: false,
             done: false,
             link: t.webViewLink || null,
             ref: { acc: acc.id, list: list.id, task: t.id },
+            ...(list.title === WEEK_LIST ? { week: true } : {}),
           }))));
     return perList.flat();
   }
@@ -317,13 +321,24 @@
   function canAddTask() {
     return ACCOUNTS.some(a => a.tasks && tokenValid(saved[a.id]));
   }
-  async function addTask(title, due) {
+  // week면 기본 목록 대신 '이번주의 할일' 목록에 넣는다
+  async function addTask(title, due, week) {
     const acc = ACCOUNTS.find(a => a.tasks && tokenValid(saved[a.id]));
     if (!acc) throw new Error('Google Tasks 로그인이 만료되었다.');
     const body = { title };
     if (due) body.due = `${due}T00:00:00.000Z`;
-    await api(acc.id, 'https://tasks.googleapis.com/tasks/v1/lists/%40default/tasks', { method: 'POST', body: JSON.stringify(body) });
+    const list = week ? await weekListId(acc.id) : '@default';
+    await api(acc.id, `${TASKS}/lists/${encodeURIComponent(list)}/tasks`, { method: 'POST', body: JSON.stringify(body) });
     await sync(acc.id);
+  }
+
+  // '이번주의 할일' 목록 id. 이름으로 찾고, 없으면 만든다
+  async function weekListId(accId) {
+    const lists = await listAll(accId, `${TASKS}/users/@me/lists?maxResults=100`, 'items');
+    const found = lists.find(l => l.title === WEEK_LIST);
+    if (found) return found.id;
+    const made = await api(accId, `${TASKS}/users/@me/lists`, { method: 'POST', body: JSON.stringify({ title: WEEK_LIST }) });
+    return made.id;
   }
 
   function disconnect(accId) {
@@ -394,6 +409,7 @@
     renew,
     canAddTask,
     addTask,
+    WEEK_LIST,
     subscribe: fn => { listeners.add(fn); return () => listeners.delete(fn); },
   };
 })();
