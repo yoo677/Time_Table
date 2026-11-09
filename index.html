@@ -80,12 +80,21 @@
       <aside id="tasks" class="pane tasks">
         <header class="tasks-header">
           <h2 class="tasks-title">할 일</h2>
-          <button type="button" id="accounts-btn" class="icon-btn" aria-label="계정 연결" aria-expanded="false" aria-controls="accounts-wrap">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg>
-          </button>
+          <div class="tasks-tools">
+            <button type="button" id="secs-btn" class="icon-btn" aria-label="묶음 보이기·숨기기" title="묶음 보이기·숨기기" aria-expanded="false" aria-controls="sec-filter-wrap">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M7 12h10M10 17h4"/></svg>
+            </button>
+            <button type="button" id="accounts-btn" class="icon-btn" aria-label="계정 연결" aria-expanded="false" aria-controls="accounts-wrap">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg>
+            </button>
+          </div>
         </header>
         <div id="accounts-wrap" class="accounts-wrap" hidden>
           <div id="accounts" class="accounts"></div>
+        </div>
+        <!-- 묶음 보기: 필요 없는 묶음(학교, 학교 외, Tasks 목록)을 숨긴다 -->
+        <div id="sec-filter-wrap" class="sec-filter-wrap" hidden>
+          <div id="sec-filter" class="sec-filter" role="group" aria-label="보일 묶음"></div>
         </div>
         <div id="task-list" class="task-list"></div>
       </aside>

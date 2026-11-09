@@ -198,6 +198,8 @@
   async function fetchTasks(acc) {
     const T = TASKS;
     const lists = await listAll(acc.id, `${T}/users/@me/lists?maxResults=100`, 'items');
+    // 할 일 패널이 목록마다 묶음을 만들 수 있게, 빈 목록까지 이름과 순서를 기억해 둔다
+    setAcc(acc.id, { lists: lists.filter(l => l.title !== WEEK_LIST).map(l => ({ id: l.id, title: l.title })) });
     const perList = await mapLimit(lists, 4, list =>
       listAll(acc.id, `${T}/lists/${encodeURIComponent(list.id)}/tasks?showCompleted=false&showHidden=false&maxResults=100`, 'items')
         .then(tasks => tasks
@@ -321,13 +323,13 @@
   function canAddTask() {
     return ACCOUNTS.some(a => a.tasks && tokenValid(saved[a.id]));
   }
-  // week면 기본 목록 대신 '이번주의 할일' 목록에 넣는다
-  async function addTask(title, due, week) {
+  // opts.week면 '이번주의 할일' 목록에, opts.list면 그 목록에, 아니면 기본 목록에 넣는다
+  async function addTask(title, due, opts = {}) {
     const acc = ACCOUNTS.find(a => a.tasks && tokenValid(saved[a.id]));
     if (!acc) throw new Error('Google Tasks 로그인이 만료되었다.');
     const body = { title };
     if (due) body.due = `${due}T00:00:00.000Z`;
-    const list = week ? await weekListId(acc.id) : '@default';
+    const list = opts.week ? await weekListId(acc.id) : opts.list || '@default';
     await api(acc.id, `${TASKS}/lists/${encodeURIComponent(list)}/tasks`, { method: 'POST', body: JSON.stringify(body) });
     await sync(acc.id);
   }
@@ -339,6 +341,12 @@
     if (found) return found.id;
     const made = await api(accId, `${TASKS}/users/@me/lists`, { method: 'POST', body: JSON.stringify({ title: WEEK_LIST }) });
     return made.id;
+  }
+
+  // 연결된 계정의 Tasks 목록('이번주의 할일' 제외). [{ acc, id, title }]
+  function taskLists() {
+    return ACCOUNTS.filter(a => a.tasks && saved[a.id] && saved[a.id].email)
+      .flatMap(a => (saved[a.id].lists || []).map(l => ({ acc: a.id, ...l })));
   }
 
   function disconnect(accId) {
@@ -410,6 +418,7 @@
     canAddTask,
     addTask,
     WEEK_LIST,
+    taskLists,
     subscribe: fn => { listeners.add(fn); return () => listeners.delete(fn); },
   };
 })();

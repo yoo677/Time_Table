@@ -260,7 +260,6 @@
     a.onfinish = () => {
       hourly.style.overflow = '';
       if (!open) hourly.classList.remove('show');
-      trimMiniChips();
     };
   });
   Weather.subscribe(renderWeather);
@@ -271,7 +270,6 @@
     appEl.dataset.tab = tab;
     document.querySelectorAll('.tabbar [role="tab"]').forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === tab)));
     Store.setUI({ tab });
-    if (tab === 'calendar') requestAnimationFrame(trimMiniChips);
   }
   document.querySelectorAll('.tabbar [role="tab"]').forEach(b => b.addEventListener('click', () => setTab(b.dataset.tab)));
   if (ui.tab) setTab(ui.tab);
@@ -298,7 +296,6 @@
     document.body.classList.add('col-resizing');
     const move = ev => {
       w = setTasksWidth(w0 - (ev.clientX - sx));
-      trimMiniChips();
     };
     const up = () => {
       splitter.classList.remove('active');
@@ -317,13 +314,11 @@
     const from = tasksPane.offsetWidth;
     const to = setTasksWidth(TASKS_W, true);
     tasksPane.animate([{ width: `${from}px` }, { width: `${to}px` }], motion(SPRING_SMOOTH));
-    setTimeout(trimMiniChips, 400);
   });
   splitter.addEventListener('keydown', e => {
     if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
     e.preventDefault();
     setTasksWidth(tasksPane.offsetWidth + (e.key === 'ArrowLeft' ? 24 : -24), true);
-    trimMiniChips();
   });
 
   // ───────── 달력 ─────────
@@ -333,11 +328,15 @@
     $('month-label').textContent = `${viewMonth.getFullYear()}년 ${viewMonth.getMonth() + 1}월`;
 
     const first = addDays(viewMonth, -viewMonth.getDay());
+    // 이 달이 걸친 주만 그린다(4~6줄). 다음 달 날짜만 있는 줄은 만들지 않는다
+    const monthDays = new Date(viewMonth.getFullYear(), viewMonth.getMonth() + 1, 0).getDate();
+    const weeks = Math.ceil((viewMonth.getDay() + monthDays) / 7);
+    grid.style.gridTemplateRows = `repeat(${weeks}, minmax(0, 1fr))`;
     const todayKey = keyOf(new Date());
     const openKeys = new Set(wins.map(w => w.key));
     const frag = document.createDocumentFragment();
 
-    for (let i = 0; i < 42; i++) {
+    for (let i = 0; i < weeks * 7; i++) {
       const d = addDays(first, i);
       const key = keyOf(d);
       const cell = el('button', 'cell');
@@ -361,13 +360,17 @@
       if (dues.length) label += `, 마감 ${dues.length}개`;
       cell.setAttribute('aria-label', label);
 
+      // 날짜 숫자는 왼쪽에 띄워 두고(float), 마감·스택 칩이 그 옆부터 채운다.
+      // 칸에 다 안 들어가면 칸 안에서 스크롤한다
+      const body = el('div', 'cell-body');
       const head = el('div', 'cell-head');
       head.append(el('span', 'num', d.getDate()));
       if (holiday) head.append(el('span', 'hol', holiday.split(' · ')[0]));
-      cell.append(head);
+      body.append(head);
+      cell.append(body);
 
       if (stacks.length || dues.length) {
-        const list = el('div', 'chips-mini');
+        const list = body;
         const dots = el('div', 'dots');
         dues.forEach(({ it, info }) => {
           const c = SOURCE_INFO[it.source].color;
@@ -388,30 +391,11 @@
             dots.append(dot);
           }
         });
-        cell.append(list, dots);
+        cell.append(dots);
       }
       frag.append(cell);
     }
     grid.replaceChildren(frag);
-    requestAnimationFrame(trimMiniChips);
-  }
-
-  // 칸에 다 안 들어가는 칩은 숨기고 +n으로 표시
-  function trimMiniChips() {
-    grid.querySelectorAll('.chips-mini').forEach(list => {
-      list.querySelector('.mini-more')?.remove();
-      const chips = [...list.children];
-      chips.forEach(c => { c.hidden = false; });
-      if (!list.offsetHeight || list.scrollHeight <= list.clientHeight) return;
-      const more = el('span', 'mini-more');
-      list.append(more);
-      let hiddenCount = 0;
-      for (let i = chips.length - 1; i >= 0 && list.scrollHeight > list.clientHeight; i--) {
-        chips[i].hidden = true;
-        hiddenCount++;
-        more.textContent = `+${hiddenCount}`;
-      }
-    });
   }
 
   // 달을 넘길 때: 지난달 칸들은 반대쪽으로 밀려 사라지고 새 달 칸들이 들어온다
@@ -578,29 +562,30 @@
     accountsEl.replaceChildren(frag);
   }
 
-  // 계정 메뉴를 펴고 접는다. 접을 때도 같은 곡선으로 높이가 줄어 아래 목록이 따라 올라온다
-  $('accounts-btn').addEventListener('click', e => {
-    const btn = e.currentTarget;
+  // 할 일 패널 위쪽 서랍(계정 메뉴, 묶음 보기)을 펴고 접는다. 접을 때도 같은 곡선으로 높이가 줄어 아래 목록이 따라 올라온다
+  function toggleDrawer(btn, wrap, inner) {
     const open = btn.getAttribute('aria-expanded') !== 'true';
     btn.setAttribute('aria-expanded', String(open));
-    const from = accountsWrap.hidden ? 0 : accountsWrap.getBoundingClientRect().height;
-    accountsWrap.getAnimations().forEach(a => a.cancel());
-    accountsEl.getAnimations().forEach(a => a.cancel());
-    accountsWrap.hidden = false;
-    const full = accountsWrap.offsetHeight;
+    const from = wrap.hidden ? 0 : wrap.getBoundingClientRect().height;
+    wrap.getAnimations().forEach(a => a.cancel());
+    inner.getAnimations().forEach(a => a.cancel());
+    wrap.hidden = false;
+    const full = wrap.offsetHeight;
     if (open) {
-      animateHeight(accountsWrap, from, full, SPRING_SMOOTH);
-      accountsEl.animate([{ opacity: from / full, transform: `translateY(${-8 * (1 - from / full)}px)` }, { opacity: 1, transform: 'none' }], motion(SPRING_SMOOTH));
+      animateHeight(wrap, from, full, SPRING_SMOOTH);
+      inner.animate([{ opacity: from / full, transform: `translateY(${-8 * (1 - from / full)}px)` }, { opacity: 1, transform: 'none' }], motion(SPRING_SMOOTH));
     } else {
-      const a = animateHeight(accountsWrap, from, 0, EASE_OUT);
-      accountsEl.animate([{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'translateY(-8px)' }], { ...motion(EASE_OUT), fill: 'forwards' });
+      const a = animateHeight(wrap, from, 0, EASE_OUT);
+      inner.animate([{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'translateY(-8px)' }], { ...motion(EASE_OUT), fill: 'forwards' });
       a.onfinish = () => {
-        accountsWrap.hidden = true;
-        accountsWrap.style.overflow = '';
-        accountsEl.getAnimations().forEach(x => x.cancel());
+        wrap.hidden = true;
+        wrap.style.overflow = '';
+        inner.getAnimations().forEach(x => x.cancel());
       };
     }
-  });
+  }
+  $('accounts-btn').addEventListener('click', e => toggleDrawer(e.currentTarget, accountsWrap, accountsEl));
+  $('secs-btn').addEventListener('click', e => toggleDrawer(e.currentTarget, $('sec-filter-wrap'), $('sec-filter')));
 
   // 로그인 자동 갱신: 팝업은 사용자 클릭 안에서만 열 수 있어서, 만료가 가까운 계정이 있으면 다음 클릭을 빌린다
   document.addEventListener('click', e => {
@@ -637,14 +622,28 @@
     return hasTime ? `${day} ${pad(d.getHours())}:${pad(d.getMinutes())}` : day;
   }
 
-  // 할 일 묶음. 항목은 위에서부터 처음 맞는 묶음에 들어간다
-  const SECTIONS = [
+  // 할 일 묶음. 항목은 위에서부터 처음 맞는 묶음에 들어간다.
+  // 구글 Tasks는 목록마다 묶음을 따로 만든다. 목록을 아직 모르면(연결 전, 예시) 'Tasks' 하나로 모은다
+  const BASE_SECTIONS = [
     { id: 'week', title: '이번주에 할 일', sub: '', match: () => false, week: true, canAdd: true },
     { id: 'school', title: '학교', sub: 'Classroom · Teams', match: it => it.account === 'school' },
     { id: 'outside', title: '학교 외', sub: 'Classroom', match: it => it.source === 'classroom' },
-    { id: 'mine', title: 'Tasks', sub: '내 할 일 목록', match: it => it.source === 'tasks', canAdd: true },
   ];
+  function sectionDefs() {
+    const lists = Sources.isDemo() ? [] : Google.taskLists();
+    const defs = [...BASE_SECTIONS];
+    lists.forEach(l => defs.push({
+      id: `list:${l.id}`, title: l.title, sub: 'Tasks', list: l, canAdd: true,
+      match: it => it.source === 'tasks' && it.ref && it.ref.list === l.id,
+    }));
+    if (lists.length) defs.push({ id: 'local', title: '이 기기', sub: 'Tasks', local: true, canAdd: true, optional: true, match: it => it.account === 'local' });
+    // 목록별 묶음이 있으면 남는 항목만 받는다(목록이 지워진 직후 등). 비면 숨긴다
+    defs.push({ id: 'mine', title: 'Tasks', sub: '내 할 일 목록', canAdd: !lists.length, optional: lists.length > 0, match: it => it.source === 'tasks' });
+    return defs;
+  }
   const collapsed = new Set(ui.collapsed || ['school', 'outside']);
+  // 숨긴 묶음. 숨겨도 이번 주가 기한인 항목은 '이번주에 할 일'에 그대로 나온다
+  const hiddenSecs = new Set(ui.hiddenSecs || []);
   const itemsById = new Map();
   let sectionBusy = 0;     // 묶음이 펴지거나 접히는 중이면 다시 그리기를 미룬다
   let renderPending = false;
@@ -730,14 +729,14 @@
   }
 
   // 묶음 id → 기한 순으로 정렬한 항목. 이번 주 항목은 '이번주에 할 일'에만 나온다
-  function buildGroups() {
+  function buildGroups(defs = sectionDefs()) {
     const all = Sources.all();
     const week = weekItems(all);
     const inWeek = new Set(week.map(it => it.id));
-    const out = new Map(SECTIONS.map(def => [def.id, []]));
+    const out = new Map(defs.map(def => [def.id, []]));
     out.set('week', week);
     all.filter(it => !it.done && !inWeek.has(it.id)).sort((a, b) => dueMs(a) - dueMs(b)).forEach(it => {
-      const def = SECTIONS.find(d => d.match(it));
+      const def = defs.find(d => d.match(it));
       if (def) out.get(def.id).push(it);
     });
     return out;
@@ -787,7 +786,7 @@
     main.append(el('div', 'task-title', it.title));
     const meta = [];
     if (it.source === 'teams') meta.push('Teams');
-    if (it.course) meta.push(it.course);
+    if (it.course && !(def && def.list)) meta.push(it.course);
     if (it.account === 'local') meta.push('이 기기');
     if (meta.length) main.append(el('div', 'task-meta', meta.join(' · ')));
     row.append(main);
@@ -821,13 +820,14 @@
   }
 
   // 할 일 추가 입력줄. 묶음마다 하나씩, 다시 그려도 입력 중인 내용이 남도록 한 번만 만든다.
-  // week: '이번주에 할 일'에 넣는다(구글 Tasks의 '이번주의 할일' 목록, 연결 전이면 이 기기)
-  function makeAddForm(secId, week) {
+  // 이번 주 묶음은 구글 Tasks의 '이번주의 할일' 목록에, 목록 묶음은 그 목록에 넣는다. 구글을 못 쓰면 이 기기에 저장
+  function makeAddForm(id) {
+    const form = { def: null };
     const f = el('form', 'task-add');
     f.hidden = true;
     f.autocomplete = 'off';
     const title = el('input', 'task-add-title');
-    title.placeholder = week ? '이번 주에 할 일' : '새 할 일';
+    title.placeholder = id === 'week' ? '이번 주에 할 일' : '새 할 일';
     title.maxLength = 120;
     title.enterKeyHint = 'done';
     const date = el('input', 'task-add-date');
@@ -840,14 +840,17 @@
       e.preventDefault();
       const name = title.value.trim();
       if (!name) { title.focus(); return; }
+      const def = form.def;
+      const due = date.value || null;
       ok.disabled = true;
       try {
-        if (Google.canAddTask()) {
-          await Google.addTask(name, date.value || null, week);
-          toast(week ? `Google Tasks의 '${Google.WEEK_LIST}' 목록에 추가했다` : 'Google Tasks에 추가했다');
+        if (!def.local && Google.canAddTask()) {
+          await Google.addTask(name, due, def.week ? { week: true } : def.list ? { list: def.list.id } : {});
+          toast(def.week ? `Google Tasks의 '${Google.WEEK_LIST}' 목록에 추가했다`
+            : def.list ? `Google Tasks의 '${def.list.title}' 목록에 추가했다` : 'Google Tasks에 추가했다');
         } else {
-          Sources.addLocal(name, date.value || null, week);
-          toast('이 기기에 저장했다. Google 개인 계정을 연결해 두면 Tasks에 바로 들어간다');
+          Sources.addLocal(name, due, def.week);
+          toast(def.local ? '이 기기에 저장했다' : '이 기기에 저장했다. Google 개인 계정을 연결해 두면 Tasks에 바로 들어간다');
         }
         title.value = '';
         date.value = '';
@@ -858,13 +861,19 @@
         ok.disabled = false;
       }
     });
-    f.addEventListener('keydown', e => { if (e.key === 'Escape') { e.stopPropagation(); toggleAddForm(secId, false); } });
-    return { f, title, date };
+    f.addEventListener('keydown', e => { if (e.key === 'Escape') { e.stopPropagation(); toggleAddForm(id, false); } });
+    return Object.assign(form, { f, title, date });
   }
-  const addForms = { week: makeAddForm('week', true), mine: makeAddForm('mine', false) };
+  const addForms = new Map();
+  function addFormFor(def) {
+    if (!addForms.has(def.id)) addForms.set(def.id, makeAddForm(def.id));
+    const form = addForms.get(def.id);
+    form.def = def;
+    return form;
+  }
 
   function toggleAddForm(id, open) {
-    const form = addForms[id];
+    const form = addForms.get(id);
     const sec = taskList.querySelector(`.sec[data-sec="${id}"]`);
     if (id === 'week' && open) {
       // 기한은 이번 주 안에서만 고르게 한다
@@ -887,7 +896,7 @@
 
   function fillBody(body, def, items, now) {
     body.replaceChildren();
-    if (def.canAdd) body.append(addForms[def.id].f);
+    if (def.canAdd) body.append(addFormFor(def).f);
     if (!items.length) {
       body.append(el('p', 'sec-empty', def.week ? '이번 주가 기한인 할 일이 없다' : def.canAdd ? '할 일이 없다. + 버튼으로 추가한다' : '남은 과제가 없다'));
       return;
@@ -915,7 +924,8 @@
     const all = Sources.all().filter(it => !it.done);
     const now = new Date();
     const frag = document.createDocumentFragment();
-    const groups = buildGroups();
+    const defs = sectionDefs();
+    const groups = buildGroups(defs);
     itemsById.clear();
     groups.forEach(items => items.forEach(it => itemsById.set(it.id, it)));
 
@@ -942,9 +952,11 @@
       frag.append(empty);
     }
 
-    SECTIONS.forEach(def => {
+    renderSecFilter(defs);
+    defs.forEach(def => {
       const items = groups.get(def.id);
-      if (!items.length && !def.canAdd && !def.week) return;
+      if (hiddenSecs.has(def.id) && !def.week) return;
+      if (!items.length && (def.optional || (!def.canAdd && !def.week))) return;
 
       const sec = el('section', `sec${def.week ? ' week' : ''}`);
       sec.dataset.sec = def.id;
@@ -973,9 +985,9 @@
         const add = el('button', 'icon-btn sec-add');
         add.type = 'button';
         add.setAttribute('aria-label', def.week ? '이번 주에 할 일 추가' : '할 일 추가');
-        add.setAttribute('aria-expanded', String(!addForms[def.id].f.hidden));
+        add.setAttribute('aria-expanded', String(!addFormFor(def).f.hidden));
         add.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
-        add.addEventListener('click', () => toggleAddForm(def.id, addForms[def.id].f.hidden));
+        add.addEventListener('click', () => toggleAddForm(def.id, addForms.get(def.id).f.hidden));
         head.append(add);
       }
       const body = el('div', 'sec-body');
@@ -984,16 +996,38 @@
       frag.append(sec);
     });
     // 입력줄을 옮기면 포커스가 풀리니 다시 잡아 준다
-    const focused = Object.values(addForms).some(a => a.f.contains(document.activeElement)) ? document.activeElement : null;
+    const focused = [...addForms.values()].some(a => a.f.contains(document.activeElement)) ? document.activeElement : null;
     taskList.replaceChildren(frag);
     if (focused) focused.focus({ preventScroll: true });
+  }
+
+  // 묶음 보기: 누르면 그 묶음을 숨기거나 다시 보인다. '이번주에 할 일'은 늘 보인다
+  function renderSecFilter(defs) {
+    const groups = buildGroups(defs);
+    const shown = defs.filter(def => !def.week && (!def.optional || groups.get(def.id).length));
+    const box = $('sec-filter');
+    box.replaceChildren(...shown.map(def => {
+      const b = el('button', 'sec-chip', def.title);
+      b.type = 'button';
+      b.setAttribute('aria-pressed', String(!hiddenSecs.has(def.id)));
+      if (def.list || def.local || def.id === 'mine') b.prepend(el('span', 'sec-chip-tag', 'Tasks'));
+      b.addEventListener('click', () => {
+        if (hiddenSecs.has(def.id)) hiddenSecs.delete(def.id); else hiddenSecs.add(def.id);
+        Store.setUI({ hiddenSecs: [...hiddenSecs] });
+        renderTasks();
+      });
+      return b;
+    }));
+    // 숨긴 묶음이 있으면 버튼에 점을 찍어 둔다
+    $('secs-btn').classList.toggle('has-hidden', shown.some(def => hiddenSecs.has(def.id)));
   }
 
   // 묶음 펴기·접기. 펼 때는 겹쳐 있던 카드들이 제자리로 튕기듯 퍼지고, 접을 때는 맨 앞 카드 뒤로 모인다
   function toggleSection(id) {
     const sec = taskList.querySelector(`.sec[data-sec="${id}"]`);
     if (!sec) return;
-    const def = SECTIONS.find(s => s.id === id);
+    const defs = sectionDefs();
+    const def = defs.find(s => s.id === id);
     const body = sec.querySelector('.sec-body');
     const opening = collapsed.has(id);
     if (opening) collapsed.delete(id); else collapsed.add(id);
@@ -1003,7 +1037,7 @@
     const from = body.getBoundingClientRect().height;
     body.getAnimations({ subtree: true }).forEach(a => a.cancel());
     const now = new Date();
-    const sorted = buildGroups().get(id);
+    const sorted = buildGroups(defs).get(id);
 
     sectionBusy++;
     const done = () => {
@@ -1037,7 +1071,7 @@
       const probe = el('div', 'sec-body');
       probe.style.cssText = `position:absolute;visibility:hidden;width:${body.offsetWidth}px`;
       fillBody(probe, def, sorted, now);
-      if (def.canAdd) body.prepend(addForms[def.id].f); // fillBody가 가져간 입력줄을 되돌린다
+      if (def.canAdd) body.prepend(addFormFor(def).f); // fillBody가 가져간 입력줄을 되돌린다
       sec.append(probe);
       const to = probe.offsetHeight;
       probe.remove();
@@ -1768,7 +1802,6 @@
   addEventListener('resize', () => {
     wins.forEach(w => { if (w.mode === 'open') w.applyRect(); });
     if (ui.tasksW || appEl.style.getPropertyValue('--tasks-w')) setTasksWidth(tasksPane.offsetWidth);
-    requestAnimationFrame(trimMiniChips);
   });
 
   function placeStack(node, s) {
